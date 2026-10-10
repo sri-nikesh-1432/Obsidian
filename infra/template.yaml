@@ -1,0 +1,588 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  OBSIDIAN — secure student document vault. Serverless boundary: one HTTP API
+  (API Gateway v2) routing every /api/v1 path to a single Lambda
+  (obsidian.gateway.dispatch); 12 DynamoDB tables (SSE-KMS + PITR); a private
+  KMS-encrypted S3 bucket holding ciphertext; a KMS CMK with rotation; a Secrets
+  Manager secret for backend credentials (Google OAuth, Resend/SMTP, Razorpay,
+  LLM); CloudWatch log retention and 429/5xx alarms.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+    Description: Sets OBSIDIAN_ENV; production forces fail-closed defaults.
+  LogRetentionInDays:
+    Type: Number
+    Default: 30
+    Description: CloudWatch Logs retention for the API.
+  DocumentBucketName:
+    Type: String
+    Default: obsidian-docs
+    Description: Globally-unique name for the private document bucket.
+  PublicBaseUrl:
+    Type: String
+    Default: "http://localhost:5173"
+    Description: >-
+      Public origin users reach the app at (CloudFront / custom domain). Drives
+      the Google OAuth redirect URI, the post-login redirect and the CORS
+      allow-list. It MUST match the Authorized origins / redirect URIs
+      registered on the Google OAuth client, character for character.
+  # Credentials are never given defaults in source. Pass them with
+  # `--parameter-overrides` (or inject them into Secrets Manager directly) so
+  # this repository carries no secrets at all.
+  GoogleClientId:
+    Type: String
+    Default: ""
+    Description: >-
+      Google OAuth 2.0 Client ID (a public identifier, not a secret).
+      Required for "Continue with Google" on all four roles.
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >-
+      Google OAuth 2.0 Client Secret. Override at deploy time with
+      --parameter-overrides or via Secrets Manager. Never commit this value.
+  RazorpayKeyId:
+    Type: String
+    Default: ""
+    Description: >-
+      Razorpay publishable key id (also sent to the browser). Pass it with
+      --parameter-overrides; test-mode ids begin with rzp_test_.
+  RazorpayKeySecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Razorpay key secret. Server-side only — never reaches the browser.
+  RazorpayWebhookSecret:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Secret configured on the Razorpay webhook endpoint (signature check).
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: python3.13
+    # x86_64 keeps `sam build` pip-only (no Docker required); switch to arm64
+    # for Graviton pricing only if you build with a container runtime.
+
+Resources:
+  # ---------------------------------------------------------------- Secrets
+  SecretsManagerSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: OBSIDIAN backend credentials (JSON keys mirror env names)
+      # JSON keys mirror the backend env names; config.load_secrets() reads them
+      # from here so no credential is ever placed in the function environment.
+      SecretString: !Sub |
+        {
+          "GOOGLE_CLIENT_ID": "${GoogleClientId}",
+          "GOOGLE_CLIENT_SECRET": "${GoogleClientSecret}",
+          "RAZORPAY_KEY_ID": "${RazorpayKeyId}",
+          "RAZORPAY_KEY_SECRET": "${RazorpayKeySecret}",
+          "RAZORPAY_WEBHOOK_SECRET": "${RazorpayWebhookSecret}",
+          "RESEND_API_KEY": "",
+          "OBSIDIAN_SMTP_PASSWORD": "",
+          "LLM_API_KEY": ""
+        }
+
+  # -------------------------------------------------------------------- KMS
+  KmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for OBSIDIAN document encryption at rest
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Delegates full control to the account root, which lets IAM
+          # policies in this account (the Lambda execution role) grant the
+          # specific kms:Decrypt/Encrypt/GenerateDataKey* actions. Keeping the
+          # key policy free of the role ARN avoids a CloudFormation dependency
+          # cycle between the key and the function role.
+          - Sid: AllowAccountAdminToManageTheKey
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  # -------------------------------------------------------------- S3 bucket
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DocumentBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KmsKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionCiphertextToIA
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DocumentBucket.Arn
+              - !Sub "${DocumentBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # --------------------------------------------------- DynamoDB (11 tables)
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "obsidian-users"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  ProfilesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-profiles"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-sessions"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  MfaTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-mfa"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  DocumentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-documents"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  SharesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-shares"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+        - { AttributeName: gsi2pk, AttributeType: S }
+        - { AttributeName: gsi2sk, AttributeType: S }
+        - { AttributeName: gsi3pk, AttributeType: S }
+        - { AttributeName: gsi3sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: gsi2
+          KeySchema:
+            - { AttributeName: gsi2pk, KeyType: HASH }
+            - { AttributeName: gsi2sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: gsi3
+          KeySchema:
+            - { AttributeName: gsi3pk, KeyType: HASH }
+            - { AttributeName: gsi3sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-audit"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  RagTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-rag"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-config"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  RateLimitsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-ratelimits"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification: { AttributeName: ttl, Enabled: true }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  DevMailTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-devmail"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # Storage billing: one row per Razorpay order + the account entitlement.
+  BillingTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: "obsidian-billing"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS, KMSMasterKeyId: !Ref KmsKey }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # ----------------------------------------------------------------- Lambda
+  GatewayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/
+      Handler: obsidian.gateway.dispatch
+      Description: OBSIDIAN API gateway (single handler for every /api/v1 route)
+      Tracing: Active
+      Layers: []
+      Environment:
+        Variables:
+          OBSIDIAN_ENV: !Ref Environment
+          OBSIDIAN_LOCAL_AWS: "false"
+          OBSIDIAN_DEV_MODE: "false"
+          OBSIDIAN_DEMO_SHOW_ERRORS: "false"
+          OBSIDIAN_RELAX_RATE_LIMITS: "false"
+          OBSIDIAN_COOKIE_SECURE: "true"
+          OBSIDIAN_TABLE_PREFIX: obsidian
+          OBSIDIAN_DOCUMENT_BUCKET: !Ref DocumentBucket
+          OBSIDIAN_KMS_KEY_ID: !Ref KmsKey
+          OBSIDIAN_SECRET_NAME: !Ref SecretsManagerSecret
+          # Both URLs derive from the public origin so the Google redirect URI
+          # (api_base_url + /auth/google/callback) is the deployed origin rather
+          # than the localhost default, and CORS allows the real frontend.
+          OBSIDIAN_PUBLIC_BASE_URL: !Ref PublicBaseUrl
+          OBSIDIAN_API_BASE_URL: !Sub "${PublicBaseUrl}/api/v1"
+          OBSIDIAN_ALLOWED_ORIGINS: !Ref PublicBaseUrl
+          OBSIDIAN_MAX_UPLOAD_MB: "8"
+          # Email: leave Resend unset and provide SMTP to deliver real OTPs.
+          OBSIDIAN_SMTP_HOST: ""
+          OBSIDIAN_SMTP_PORT: "587"
+          OBSIDIAN_SMTP_USERNAME: ""
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AWSXrayWriteOnlyAccess
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:BatchGetItem
+                - dynamodb:BatchWriteItem
+              Resource:
+                - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/obsidian-*"
+                - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/obsidian-*/index/*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:ListBucket
+              Resource:
+                - !GetAtt DocumentBucket.Arn
+                - !Sub "${DocumentBucket.Arn}/*"
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+                - kms:GenerateDataKey*
+                - kms:DescribeKey
+              Resource: !GetAtt KmsKey.Arn
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref SecretsManagerSecret
+      Events:
+        ApiRoot:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /
+            Method: ANY
+        ApiProxy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /{proxy+}
+            Method: ANY
+
+  # ---------------------------------------------------- API Gateway (HTTP)
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100
+        ThrottlingRateLimit: 50
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","status":"$context.status",
+          "responseLatency":"$context.responseLatency"}
+
+  # ---------------------------------------------------------- CloudWatch
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/httpapi/obsidian-${Environment}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${GatewayFunction}"
+      RetentionInDays: !Ref LogRetentionInDays
+
+  Metric5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "obsidian-${Environment}-5xx"
+      AlarmDescription: "HTTP 5xx errors -> check gateway/fail-closed posture"
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref HttpApi
+
+  Metric429:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "obsidian-${Environment}-rate-limited"
+      AlarmDescription: "Rate limiter triggered (HTTP 429) -> possible brute force"
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref HttpApi
+
+Outputs:
+  HttpApiEndpoint:
+    Description: Base URL for the deployed vault API (call /api/v1/... under it)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  LambdaFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt GatewayFunction.Arn
+  DocumentBucket:
+    Description: Private S3 bucket holding encrypted ciphertext
+    Value: !Ref DocumentBucket
+  KmsKeyArn:
+    Description: CMK used for encryption at rest
+    Value: !GetAtt KmsKey.Arn
+  SecretsManagerSecretArn:
+    Description: ARN of the credentials secret
+    Value: !Ref SecretsManagerSecret
+  GoogleRedirectUri:
+    Description: >-
+      Register this exact value as an Authorized redirect URI on the Google
+      OAuth client (Authorized origin = the same PublicBaseUrl).
+    Value: !Sub "${PublicBaseUrl}/api/v1/auth/google/callback"

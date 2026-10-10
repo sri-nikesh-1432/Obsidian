@@ -1,0 +1,45 @@
+# Netlify deploy for the OBSIDIAN frontend.
+#
+#   netlify deploy --build --prod
+#
+# Netlify hosts the static SPA only. Point it at a running OBSIDIAN API by
+# replacing the origin in the /api redirect below with your backend host, and
+# add that Netlify domain to OBSIDIAN_ALLOWED_ORIGINS on the backend.
+#
+# Alternatively skip the proxy and talk to the API cross-origin:
+#   [build.environment]
+#     VITE_API_BASE = "https://your-obsidian-api.example.com"
+
+[build]
+  base = "frontend"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# API proxy (must come before the SPA fallback — first match wins).
+[[redirects]]
+  from = "/api/v1/*"
+  to = "https://REPLACE-WITH-YOUR-OBSIDIAN-BACKEND/api/v1/:splat"
+  status = 200
+  force = true
+
+# SPA fallback — every client route renders index.html.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

@@ -1,0 +1,31 @@
+# One-command deploy with no cloud account required:
+#
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Optional integrations are read from the environment / a .env file:
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET   -> "Continue with Google" (all roles)
+#   RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, RAZORPAY_WEBHOOK_SECRET
+#   OBSIDIAN_SMTP_HOST, OBSIDIAN_SMTP_USERNAME, OBSIDIAN_SMTP_PASSWORD
+#                                             -> real OTP email delivery
+services:
+  obsidian:
+    build: .
+    image: obsidian:latest
+    ports:
+      - "8080:8080"
+    environment:
+      OBSIDIAN_PUBLIC_BASE_URL: ${OBSIDIAN_PUBLIC_BASE_URL:-http://localhost:8080}
+      OBSIDIAN_API_BASE_URL: ${OBSIDIAN_API_BASE_URL:-http://localhost:8080/api/v1}
+      OBSIDIAN_ALLOWED_ORIGINS: ${OBSIDIAN_ALLOWED_ORIGINS:-http://localhost:8080}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      OBSIDIAN_SMTP_HOST: ${OBSIDIAN_SMTP_HOST:-}
+      OBSIDIAN_SMTP_PORT: ${OBSIDIAN_SMTP_PORT:-587}
+      OBSIDIAN_SMTP_USERNAME: ${OBSIDIAN_SMTP_USERNAME:-}
+      OBSIDIAN_SMTP_PASSWORD: ${OBSIDIAN_SMTP_PASSWORD:-}
+      OBSIDIAN_DEV_MODE: ${OBSIDIAN_DEV_MODE:-true}
+    restart: unless-stopped

@@ -1,0 +1,389 @@
+# OBSIDIAN
+
+A secure student document vault. Students upload, encrypt, and share
+documents; faculty verify students; recruiters view consented profiles;
+admins see analytics and audit trails. A personal, consent-gated AI assistant
+(**OBSIDIAN Intelligence**) answers questions grounded in a user's own
+documents and profile.
+
+- **Backend** — Python "Lambda" handlers (`backend/obsidian/`) that run
+  unchanged on AWS API Gateway + Lambda. Locally, AWS (DynamoDB, S3, KMS) is
+  emulated **in-process by moto**, so no AWS account or Docker is needed.
+- **Frontend** — Vite + React + TypeScript + Tailwind.
+
+---
+
+## Run it locally (preview)
+
+Open **three terminals**.
+
+### 1. Backend API (port 5000)
+
+```bash
+cd backend
+pip install -r requirements.txt
+# Point at a local model for full conversational answers (optional):
+LLM_PROVIDER=ollama LLM_MODEL=llama3.2:3b python local/server.py   # http://127.0.0.1:5000
+```
+
+Set `LLM_MODEL` to a model you have pulled (`ollama list`). Without a model the
+app still runs — Intelligence just reports that no model is configured instead
+of pretending retrieval is an answer.
+
+### 2. Seed demo data (once, while the backend is running)
+
+```bash
+cd backend
+python local/seed.py http://127.0.0.1:5000
+```
+
+### 3. Frontend (port 5173)
+
+```bash
+cd frontend
+npm install
+npm run dev                     # http://localhost:5173
+```
+
+Open <http://localhost:5173>. The Vite dev server proxies `/api` to the backend
+on port 5000 (same-origin cookies). Only `/api` is proxied: the public share
+pages live at `/s/:token` and are served by the SPA. To point at a different
+backend, set `VITE_API_TARGET`.
+
+---
+
+## Demo accounts
+
+Password for all accounts: **`correct-horse-battery`**
+
+| Role      | Email                     |
+| --------- | ------------------------- |
+| Student   | `arjun@obsidian.dev`      |
+| Student   | `meera@obsidian.dev`      |
+| Faculty   | `prof.rao@obsidian.dev`   |
+| Recruiter | `talent@northwind.io`     |
+| Admin     | `admin@obsidian.dev`      |
+
+Sign-in uses an **email one-time code (OTP)**. In dev mode the code is returned
+by the API and surfaced in the UI, so no email is sent. Choose the role that
+matches the account at sign-in.
+
+---
+
+## Role-based onboarding
+
+Each account completes a **role-specific** form, driven by the server-verified
+role (never a client-supplied one). The field definitions live in
+`backend/obsidian/profile_schema.py` (backend truth) and
+`frontend/src/lib/roleProfile.ts` (UI mirror).
+
+| Role      | Onboarding fields |
+| --------- | ----------------- |
+| Student   | name, phone, institution, course, education level, department, year, graduation year, CGPA, skills, bio, profile visibility |
+| Faculty   | name, institution, faculty/employee ID, department, designation, areas of expertise, office contact, bio |
+| Recruiter | name, company, job title, industry, company website, hiring domains, contact number |
+| Admin     | name, admin/operations designation, organization |
+
+A role can only set the fields belonging to it — a faculty account sending
+`cgpa` gets `422`, and never receives student fields back. **Admin accounts
+cannot be self-registered in production**; they are provisioned through a
+trusted authorization path.
+
+---
+
+## Sign in with Google (every role, sign-in and sign-up)
+
+One Google OAuth client powers **all four roles** on **both** the sign-in and
+sign-up surfaces, and from the landing page — one flow, selected by a role
+picker rather than a button per role.
+
+```
+frontend (landing · /login · /signup)        backend  obsidian.functions.auth
+  │ GET /api/v1/auth/google/start?role=X  ──▶  validate role, mint single-use
+  │                                            state, stash {role} in DynamoDB
+  │ ◀── { url: https://accounts.google.com/… }   (client secret stays server-side)
+  │ window.location.href = url                 (full-page redirect)
+  ▼
+accounts.google.com ──▶ GET {PUBLIC}/api/v1/auth/google/callback?code&state
+                                                    │ verify state (TTL, one-shot)
+                                                    │ exchange code → verify id_token
+                                                    │ (aud, iss, exp, email_verified)
+                                                    ▼
+                                       existing email → sign in
+                                       new email      → create with stashed role
+                                                        + role profile + audit event
+                                                    │ set session cookie
+                                                    ▼
+                                         302 → {PUBLIC}/auth/complete
+```
+
+- **Endpoints** — `GET /api/v1/auth/google/start?role=<student|faculty|recruiter|admin>`
+  and `GET /api/v1/auth/google/callback`.
+- **Role handling** — the role is sent to `start` and stashed server-side with a
+  single-use `state`; the callback trusts only that, never a client-supplied role.
+- **Sign-in vs sign-up** — one flow: an existing email signs in, a new email is
+  created with the chosen role and a role-specific profile row. Wired for every
+  role on `/login`, `/signup` and the landing page (`GoogleAuthButton`).
+- **Admin** — Google signs in an *existing* admin; a **new** admin account is not
+  self-registered in production (dev mode allows it), matching the OTP path.
+- **Where the client lives** — `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` come
+  from the environment or from AWS Secrets Manager via `OBSIDIAN_SECRET_NAME`.
+  The browser only ever receives the authorization URL.
+
+**Register these on the OAuth client** (Google Cloud console → APIs & Services →
+Credentials), character for character:
+
+| Field | Local development | Deployed |
+| ----- | ----------------- | -------- |
+| Authorized JavaScript origin | `http://localhost:5173` | your `PublicBaseUrl` |
+| Authorized redirect URI | `http://localhost:5173/api/v1/auth/google/callback` | `${PublicBaseUrl}/api/v1/auth/google/callback` |
+
+In dev the redirect goes through the Vite proxy so it is same-origin (cookies
+behave as in production). Open the app at `http://localhost:5173` — **not**
+`127.0.0.1` — or the origin won't match. After deployment, the `GoogleRedirectUri`
+stack output prints the exact value to register.
+
+---
+
+## Tests
+
+```bash
+# Unit / integration suite (no server needed)
+cd backend && python -m pytest tests/          # 76 tests
+
+# End-to-end smoke against a running stack
+python tests/e2e_smoke.py http://localhost:5173   # 27 checks
+```
+
+---
+
+## Storage & payments (students)
+
+Every student account starts with **5 GB free**. Uploading is refused with
+`402 STORAGE_QUOTA_EXCEEDED` once the entitlement is full. Paid plans *add*
+10 GB permanently:
+
+| Plan | Total storage | Price (one-time, INR) |
+| ---- | ------------- | --------------------- |
+| Free | 5 GB | — |
+| Plan 1 | 15 GB | **₹3,999** |
+| Plan 2 | 25 GB | **₹6,999** |
+| Plan 3 | 35 GB | **₹6,999** |
+| … | +10 GB each | **₹6,999** |
+
+The ladder is defined once, server-side, in `backend/obsidian/plans.py`. The
+client can never choose a price or skip a step.
+
+### Payment flow (Razorpay)
+
+```
+POST /api/v1/billing/orders   -> server creates the Razorpay order (price fixed server-side)
+Razorpay Checkout             -> user pays
+POST /api/v1/billing/verify   -> server checks HMAC(order_id|payment_id) with the key secret
+POST /api/v1/billing/webhook  -> optional out-of-band confirmation (webhook secret)
+```
+
+Only a passing signature check credits storage, and crediting is idempotent —
+a replayed or duplicated confirmation never adds space twice. The key secret
+never leaves the backend; the browser receives only the publishable key id.
+
+| Endpoint | Who | Purpose |
+| -------- | --- | ------- |
+| `GET /billing/plans` | public | The plan ladder |
+| `GET /billing/status` | student | Used / entitlement / next plan |
+| `POST /billing/orders` | student | Create an order for the next plan |
+| `POST /billing/verify` | student | Confirm a Checkout payment (signature checked) |
+| `POST /billing/webhook` | public (signed) | Razorpay webhook confirmation |
+| `GET /billing/history` | student | Purchase history |
+
+`GET /auth/me` and `GET /documents` also carry a `storage` block, so the meter
+in the sidebar and the vault renders without an extra round-trip.
+
+---
+
+## Deploy (Docker · AWS · Netlify · Google)
+
+See **[docs/DEPLOY.md](docs/DEPLOY.md)**. The short version:
+
+```bash
+docker compose up --build     # full app on http://localhost:8080 — NO cloud
+                              # credentials of any kind required
+```
+
+The Docker image serves the built SPA and the API from one process; DynamoDB,
+S3 and KMS are served in-process by moto, so the *same* handlers that deploy to
+Lambda run unchanged and no AWS account is needed. Google sign-in, SMTP email
+and Razorpay are switched on purely by environment variables.
+
+---
+
+## Deploy to AWS (S3 · KMS · DynamoDB · API Gateway · Lambda)
+
+`infra/template.yaml` is a SAM template provisioning the whole serverless
+boundary. The same handlers in `backend/obsidian/` run unchanged on Lambda
+(`OBSIDIAN_LOCAL_AWS=false`, so real AWS is used).
+
+| Piece | Resource | Purpose |
+| ----- | -------- | ------- |
+| **Lambda** | `GatewayFunction` — `obsidian.gateway.dispatch` | One function serves every `/api/v1` route; X-Ray tracing on. |
+| **API Gateway** | `HttpApi` (HTTP API v2, stage `v1`) | Routes `/` and `/{proxy+}` to the Lambda; 100 burst / 50 rps throttle; JSON access logs. |
+| **DynamoDB** | 12 tables — `obsidian-users`, `-profiles`, `-sessions`, `-mfa`, `-documents`, `-shares`, `-audit`, `-rag`, `-config`, `-ratelimits`, `-devmail`, `-billing` | Pay-per-request, SSE-KMS, PITR; `ratelimits` has TTL. |
+| **S3** | `DocumentBucket` | Private (all public access blocked), SSE-KMS with the CMK, versioned, STANDARD_IA at 30 days, TLS-only bucket policy. Holds ciphertext only. |
+| **KMS** | `KmsKey` | CMK with automatic rotation; wraps per-document data keys. Key policy delegates to the account root to avoid a CFN dependency cycle. |
+| **Secrets Manager** | `SecretsManagerSecret` | JSON credentials (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RESEND_API_KEY`, `OBSIDIAN_SMTP_PASSWORD`, `LLM_API_KEY`), loaded at cold start via `OBSIDIAN_SECRET_NAME`. |
+| **CloudWatch** | log groups + `5xx` / `429` alarms | 30-day retention (configurable). |
+
+### Build & deploy
+
+```bash
+cd infra
+sam build                 # pip-only packaging (x86_64) — no Docker needed
+sam validate --lint       # template + cfn-lint
+sam deploy --guided       # first run; afterwards: sam deploy
+```
+
+Key parameters (`--parameter-overrides`):
+
+| Parameter | Default | Notes |
+| --------- | ------- | ----- |
+| `PublicBaseUrl` | `http://localhost:5173` | **Set to your CloudFront / custom domain.** Drives the OAuth redirect, post-login redirect and CORS. |
+| `GoogleClientId` | *(empty)* | Required for Google sign-in (a public identifier). |
+| `GoogleClientSecret` | *(empty)* `NoEcho` | Required for Google sign-in. Never committed — pass at deploy time. |
+| `RazorpayKeyId` | test key id | Publishable — also sent to the browser. |
+| `RazorpayKeySecret` | *(empty)* `NoEcho` | **Required for real payments.** Server-side only. |
+| `RazorpayWebhookSecret` | *(empty)* `NoEcho` | Secret configured on the Razorpay webhook endpoint. |
+| `Environment` | `production` | `production` forces fail-closed defaults (secure cookies, no dev mode). |
+| `DocumentBucketName` | `obsidian-docs` | Must be globally unique. |
+
+Credentials are **never given defaults in source** — every secret parameter
+(Google, Razorpay) defaults to empty and must be supplied via
+`--parameter-overrides` or Secrets Manager, so the repository contains no
+secrets and is safe to push.
+
+`sam build` packages the `obsidian` package plus its dependencies (boto3,
+argon2, cffi, google-auth…). Deploying needs **real AWS credentials** — Google
+OAuth credentials authenticate the *user*, not the AWS API.
+
+### What the Lambda is given
+
+`OBSIDIAN_LOCAL_AWS=false`, `OBSIDIAN_DEV_MODE=false`, `OBSIDIAN_COOKIE_SECURE=true`,
+`OBSIDIAN_TABLE_PREFIX=obsidian`, the bucket and KMS key IDs, and
+`OBSIDIAN_SECRET_NAME`. `OBSIDIAN_PUBLIC_BASE_URL=PublicBaseUrl`,
+`OBSIDIAN_API_BASE_URL=${PublicBaseUrl}/api/v1`, and
+`OBSIDIAN_ALLOWED_ORIGINS=PublicBaseUrl`, so the OAuth redirect and CORS point at
+the deployed origin rather than localhost. IAM grants least-privilege access to
+just those tables, the bucket, the key, and the one secret.
+
+---
+
+## Your part — credentials for full functionality / deploy
+
+Local preview works with none of these. Supply them to enable the features
+below (export them into the backend's environment; a `.env` file is not read
+automatically).
+
+| Feature | Variables | Where to get it |
+| ------- | --------- | --------------- |
+| Email OTP delivery (API) | `RESEND_API_KEY`, `OBSIDIAN_FROM_EMAIL` | https://resend.com/api-keys |
+| Email OTP delivery (SMTP) | `OBSIDIAN_SMTP_HOST`, `OBSIDIAN_SMTP_PORT`, `OBSIDIAN_SMTP_USERNAME`, `OBSIDIAN_SMTP_PASSWORD` | Any SMTP relay — a Gmail app password works |
+| Storage payments | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` | https://dashboard.razorpay.com/app/keys |
+| "Sign in with Google" (all roles) | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google Cloud console — see *Sign in with Google* |
+| AI answers (default) | `LLM_PROVIDER=ollama`, `LLM_MODEL=<pulled model>` | Local [Ollama](https://ollama.com) — `ollama pull llama3.2` |
+| AI answers (hosted) | `LLM_PROVIDER=openai`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | Any OpenAI-compatible provider |
+| Deploy to real AWS | AWS creds; then `infra/template.yaml` parameters | See *Deploy to AWS* — provisions S3, KMS, DynamoDB, API Gateway, Lambda, Secrets Manager |
+
+Until an email channel is configured (`RESEND_API_KEY`, or `OBSIDIAN_SMTP_HOST`),
+the app runs in **dev mode**: OTPs appear in the UI instead of being emailed.
+Delivery order is Resend → SMTP → local dev mailbox.
+
+### Environment reference
+
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `OBSIDIAN_ENV` | `development` | Set to `production` to lock down dev behaviour |
+| `OBSIDIAN_LOCAL_AWS` | `true` | Use in-process moto instead of real AWS |
+| `OBSIDIAN_DEV_MODE` | `true` | Surface OTPs / dev affordances |
+| `OBSIDIAN_RELAX_RATE_LIMITS` | `false` (dev server sets `1`) | Scale up rate limits for seeding/tests |
+| `OBSIDIAN_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | CORS allow-list |
+| `OBSIDIAN_COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
+| `OBSIDIAN_STATIC_DIR` | *(empty)* | Serve the built SPA from the API process (single-container deploy) |
+| `OBSIDIAN_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` | *(empty)* / `587` | SMTP delivery for real OTP email |
+| `RAZORPAY_KEY_ID` / `_KEY_SECRET` / `_WEBHOOK_SECRET` | *(empty)* | Storage payments. Unset ⇒ simulated checkout in dev mode only |
+| `LLM_PROVIDER` | `ollama` | `ollama` or any OpenAI-compatible provider |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Model endpoint (OpenAI-compatible path) |
+| `LLM_MODEL` | `llama3.2` | Must be a model the provider has |
+| `LLM_API_KEY` | *(empty)* | Required for hosted providers; unused by Ollama |
+| `EMBEDDING_MODEL` | *(empty)* | Reserved for provider embeddings |
+| `RETRIEVAL_TOP_K` | `8` | Passages passed to the model per question |
+| `LLM_TIMEOUT_SECONDS` | `60` | Generation timeout |
+
+---
+
+## How OBSIDIAN Intelligence answers
+
+```
+question → isolate to the user's own partition → hybrid retrieval
+(profile + document chunks) → LLM writes a grounded answer → cited sources
+```
+
+- **Isolation** is enforced server-side: the RAG identity comes from the
+  session, never from a request parameter. Retrieval only ever queries
+  `RAG#<user_id>`.
+- **Retrieval** is hybrid (vector similarity + lexical overlap) over the user's
+  own profile and eligible documents, with page numbers tracked for citations.
+- **Generation** is done by the configured model. Retrieval supplies evidence;
+  it is never returned as the answer. With no model configured the API returns
+  an explicit notice rather than raw fragments.
+- **Conversation memory**: the client sends recent turns; follow-ups such as
+  "which project did I work on *there*" resolve against prior context.
+- **Citations**: each answer lists the source documents (and page numbers where
+  available). The profile summary is used as context but is not cited as a file.
+- **Consent**: nothing is indexed until the user opts in; opting out deletes
+  every vector in their partition. The vault works fully without AI.
+
+---
+
+## Project layout
+
+```
+backend/
+  obsidian/          Lambda handlers + shared runtime
+    gateway.py       request pipeline (auth -> role -> authorize -> audit)
+    router.py        route table and {param} matching
+    profile_schema.py role profile fields (single source of truth)
+    rag.py           ingestion, per-user retrieval, conversational answers
+    functions/       auth, documents, sharing, profile, intelligence, admin, billing ...
+    plans.py         student storage plan ladder (5 GB free, +10 GB tiers)
+    aws.py           moto bootstrap + cached boto3 clients
+  local/
+    server.py        local API Gateway-compatible dev server (port 5000)
+    seed.py          demo data seeder (drives the real API)
+  tests/             pytest suite
+frontend/
+  src/components/StorageMeter.tsx  quota meter (sidebar + vault)
+  src/pages/student/Billing.tsx    plans + Razorpay Checkout + history
+  src/lib/razorpay.ts      Checkout helper
+  src/lib/roleProfile.ts   role-specific profile field definitions
+  src/components/Markdown.tsx  lightweight answer renderer
+  src/pages/student/Intelligence.tsx  conversational assistant UI
+tests/e2e_smoke.py   end-to-end smoke against the running stack
+Dockerfile            single-container deploy (frontend + API, no cloud creds)
+docker-compose.yml    one-command deploy
+netlify.toml          static frontend deploy
+infra/template.yaml   AWS SAM stack (S3 · KMS · DynamoDB · API Gateway · Lambda)
+docs/DEPLOY.md        deploy guide for every target
+```
+
+## Known gaps
+
+- Embeddings are deterministic feature-hashing (offline, no external service).
+  `EMBEDDING_MODEL` is reserved for wiring real provider embeddings.
+- Faculty/recruiter *verification* is not yet an approval workflow — accounts
+  are trusted on creation. Only admin self-registration is hard-blocked.
+- Assistant responses are not streamed yet (answers arrive complete).
+- Storage upgrades are one-time purchases, not auto-renewing subscriptions; a
+  Razorpay subscription plan would be the next step.
+- The Docker deployment runs AWS in-process (moto), so its data is **ephemeral**
+  and resets when the container restarts. Use the AWS stack for durable storage.
+- Every later +10 GB tier is priced at ₹6,999 (the specification gives explicit
+  prices for the 15 GB and 25 GB plans only).

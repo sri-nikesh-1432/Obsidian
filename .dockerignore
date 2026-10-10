@@ -1,0 +1,15 @@
+**/node_modules
+frontend/dist
+**/__pycache__
+**/.pytest_cache
+**/.moto
+infra/.aws-sam
+.git
+.github
+.env
+.env.*
+*.log
+tests/
+backend/tests/
+docs/
+README.md
