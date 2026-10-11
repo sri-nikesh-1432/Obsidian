@@ -32,14 +32,17 @@ COPY --from=web /web/dist ./web
 
 # Self-contained defaults: in-process AWS, no external services required.
 # Override any of these with -e / --env-file for Google, Razorpay or SMTP.
+# The public origin defaults to the Netlify site that proxies /api/v1/* to this
+# service; override OBSIDIAN_*_BASE_URL and OBSIDIAN_ALLOWED_ORIGINS when the
+# service answers on a different origin.
 ENV OBSIDIAN_LOCAL_AWS=true \
     OBSIDIAN_DEV_MODE=true \
     OBSIDIAN_API_HOST=0.0.0.0 \
     OBSIDIAN_API_PORT=8080 \
     OBSIDIAN_STATIC_DIR=/app/web \
-    OBSIDIAN_PUBLIC_BASE_URL=http://localhost:8080 \
-    OBSIDIAN_API_BASE_URL=http://localhost:8080/api/v1 \
-    OBSIDIAN_ALLOWED_ORIGINS=http://localhost:8080
+    OBSIDIAN_PUBLIC_BASE_URL=https://obsidiancloud.netlify.app \
+    OBSIDIAN_API_BASE_URL=https://obsidiancloud.netlify.app/api/v1 \
+    OBSIDIAN_ALLOWED_ORIGINS=https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com
 
 EXPOSE 8080
 

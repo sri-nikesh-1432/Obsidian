@@ -17,9 +17,10 @@ interface NavItem {
   end?: boolean
 }
 
-function navFor(role?: Role, aiEnabled?: boolean): NavItem[] {
+function primaryNavFor(role?: Role, aiEnabled?: boolean): NavItem[] {
   if (role === 'faculty' || role === 'recruiter') {
     return [
+      { to: '/app/home', label: 'Home', icon: LayoutDashboard, end: true },
       { to: '/app/find-student', label: 'Find a student', icon: ScanSearch },
     ]
   }
@@ -32,16 +33,21 @@ function navFor(role?: Role, aiEnabled?: boolean): NavItem[] {
     { to: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/app/vault', label: 'Documents', icon: FolderLock },
     { to: '/app/links', label: 'Shared links', icon: Link2 },
-    { to: '/app/profile', label: 'Profile', icon: UserRound },
     { to: '/app/activity', label: 'Activity', icon: Activity },
   ]
   if (aiEnabled) {
     items.push({ to: '/app/intelligence', label: 'Intelligence', icon: Sparkles })
   }
   items.push({ to: '/app/storage', label: 'Storage', icon: HardDrive })
-  items.push({ to: '/app/security', label: 'Security', icon: ShieldCheck })
   return items
 }
+
+// The same two account destinations for every role, so switching identities
+// never changes the shape of the interface — only what the role may do.
+const ACCOUNT_NAV: NavItem[] = [
+  { to: '/app/profile', label: 'Profile', icon: UserRound },
+  { to: '/app/security', label: 'Security', icon: ShieldCheck },
+]
 
 const ROLE_LABEL: Record<Role, string> = {
   student: 'Student',
@@ -50,13 +56,32 @@ const ROLE_LABEL: Record<Role, string> = {
   admin: 'Administrator',
 }
 
+function NavItemLink({ item }: { item: NavItem }) {
+  return (
+    <NavLink
+      to={item.to}
+      end={item.end}
+      className={({ isActive }) =>
+        `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all focus-ring ${
+          isActive
+            ? 'bg-charcoal text-[#f5f0e6] shadow-[0_10px_24px_-16px_rgba(27,24,21,0.9)]'
+            : 'text-graphite hover:bg-white/70'
+        }`
+      }
+    >
+      <item.icon size={16} strokeWidth={1.9} />
+      <span className="font-medium">{item.label}</span>
+    </NavLink>
+  )
+}
+
 export default function AppShell() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
-  const items = navFor(user?.role, user?.ai_enabled)
+  const primary = primaryNavFor(user?.role, user?.ai_enabled)
 
   useEffect(() => {
     setMobileOpen(false)
@@ -80,24 +105,20 @@ export default function AppShell() {
         </NavLink>
       </div>
 
-      <nav className="flex-1 px-3 space-y-1 overflow-y-auto scrollbar-thin" aria-label="Primary">
-        {items.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            className={({ isActive }) =>
-              `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition-all focus-ring ${
-                isActive
-                  ? 'bg-charcoal text-[#f5f0e6] shadow-[0_10px_24px_-16px_rgba(27,24,21,0.9)]'
-                  : 'text-graphite hover:bg-white/70'
-              }`
-            }
-          >
-            <item.icon size={16} strokeWidth={1.9} />
-            <span className="font-medium">{item.label}</span>
-          </NavLink>
-        ))}
+      <nav className="flex-1 px-3 overflow-y-auto scrollbar-thin" aria-label="Primary">
+        <div className="space-y-1">
+          {primary.map((item) => (
+            <NavItemLink key={item.to} item={item} />
+          ))}
+        </div>
+        <div className="pt-5 pb-1.5 px-3">
+          <span className="text-[10px] font-semibold tracking-[0.22em] uppercase text-faint">Account</span>
+        </div>
+        <div className="space-y-1 pb-2">
+          {ACCOUNT_NAV.map((item) => (
+            <NavItemLink key={item.to} item={item} />
+          ))}
+        </div>
       </nav>
 
       <div className="p-3 mt-auto space-y-3">

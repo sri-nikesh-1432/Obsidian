@@ -26,6 +26,7 @@ import SecurityCenter from './pages/student/SecurityCenter'
 import Intelligence from './pages/student/Intelligence'
 import Billing from './pages/student/Billing'
 
+import RoleHome from './pages/role/Home'
 import FindStudent from './pages/role/FindStudent'
 import Admin from './pages/role/Admin'
 import SharedLink from './pages/SharedLink'
@@ -55,6 +56,11 @@ function RequireAuth({ children }: { children: ReactNode }) {
     return <Navigate to={homePathFor(user.role)} replace />
   }
   return <>{children}</>
+}
+
+function AppIndex() {
+  const { user } = useAuth()
+  return <Navigate to={homePathFor(user?.role)} replace />
 }
 
 function RequireRole({ roles, children }: { roles: Role[]; children: ReactNode }) {
@@ -109,8 +115,8 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<Navigate to="/app/dashboard" replace />} />
-        <Route path="dashboard" element={<Dashboard />} />
+        <Route index element={<AppIndex />} />
+        <Route path="dashboard" element={<RequireRole roles={['student']}><Dashboard /></RequireRole>} />
         <Route path="vault" element={<Vault />} />
         <Route path="vault/:id" element={<DocumentDetail />} />
         <Route path="links" element={<Links />} />
@@ -119,6 +125,14 @@ export default function App() {
         <Route path="security" element={<SecurityCenter />} />
         <Route path="intelligence" element={<Intelligence />} />
         <Route path="storage" element={<Billing />} />
+        <Route
+          path="home"
+          element={
+            <RequireRole roles={['faculty', 'recruiter']}>
+              <RoleHome />
+            </RequireRole>
+          }
+        />
         <Route
           path="find-student"
           element={

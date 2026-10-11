@@ -58,7 +58,7 @@ export function homePathFor(role?: Role): string {
   switch (role) {
     case 'faculty':
     case 'recruiter':
-      return '/app/find-student'
+      return '/app/home'
     case 'admin':
       return '/app/admin'
     default:

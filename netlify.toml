@@ -2,18 +2,18 @@
 #
 #   netlify deploy --build --prod
 #
-# Netlify hosts the static SPA only. Point it at a running OBSIDIAN API by
-# replacing the origin in the /api redirect below with your backend host, and
-# add that Netlify domain to OBSIDIAN_ALLOWED_ORIGINS on the backend.
+# Netlify serves the static SPA only. The /api/v1/* route below is proxied
+# (status 200) to the live OBSIDIAN backend on Render, so the browser stays
+# same-origin and session cookies behave exactly as they do locally.
 #
-# Alternatively skip the proxy and talk to the API cross-origin:
-#   [build.environment]
-#     VITE_API_BASE = "https://your-obsidian-api.example.com"
+# The backend must list this Netlify origin in OBSIDIAN_ALLOWED_ORIGINS (it
+# validates Origin on every state-changing request):
+#   OBSIDIAN_ALLOWED_ORIGINS=https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com
 
 [build]
   base = "frontend"
   command = "npm ci && npm run build"
-  publish = "dist"
+  publish = "frontend/dist"
 
 [build.environment]
   NODE_VERSION = "22"
@@ -21,7 +21,7 @@
 # API proxy (must come before the SPA fallback — first match wins).
 [[redirects]]
   from = "/api/v1/*"
-  to = "https://REPLACE-WITH-YOUR-OBSIDIAN-BACKEND/api/v1/:splat"
+  to = "https://obsidian-abax.onrender.com/api/v1/:splat"
   status = 200
   force = true
 
