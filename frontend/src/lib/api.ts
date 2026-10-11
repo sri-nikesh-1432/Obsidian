@@ -56,6 +56,11 @@ export async function api<T = any>(path: string, options: RequestOptions = {}): 
 
   if (!res.ok) {
     const err = data?.error
+    // A dead/expired server session must drop the client back to login rather
+    // than surfacing a raw "you must be signed in" error inside the app.
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('obsidian:unauthorized'))
+    }
     throw new ApiError(
       res.status,
       err?.code ?? 'UNKNOWN',

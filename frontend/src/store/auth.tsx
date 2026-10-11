@@ -40,6 +40,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh()
   }, [refresh])
 
+  // Any 401 from the API means the server-side session is gone; drop local
+  // auth so route guards send the user back to the sign-in page.
+  useEffect(() => {
+    const onUnauthorized = () => setUser(null)
+    window.addEventListener('obsidian:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('obsidian:unauthorized', onUnauthorized)
+  }, [])
+
   const value = useMemo(
     () => ({ user, loading, refresh, setUser, logout }),
     [user, loading, refresh, logout],
