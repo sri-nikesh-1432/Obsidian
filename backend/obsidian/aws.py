@@ -351,6 +351,15 @@ def ensure_resources() -> None:
             print(f"[obsidian] object store: Cloudflare R2 bucket {settings.document_bucket!r} "
                   f"at {settings.r2_endpoint}")
         else:
+            if settings.storage_backend in ("kv", "workers-kv", "workers_kv"):
+                print("[obsidian] WARNING: OBSIDIAN_STORAGE_BACKEND=kv but Cloudflare KV is not "
+                      "fully configured (need OBSIDIAN_CF_ACCOUNT_ID, OBSIDIAN_CF_API_TOKEN, "
+                      "OBSIDIAN_KV_NAMESPACE_ID); falling back to in-memory S3 - data will NOT "
+                      "persist across restarts.")
+            elif settings.storage_backend == "r2":
+                print("[obsidian] WARNING: OBSIDIAN_STORAGE_BACKEND=r2 but R2 is not fully "
+                      "configured; falling back to in-memory S3 - data will NOT persist across "
+                      "restarts.")
             buckets = {b["Name"] for b in s3.list_buckets().get("Buckets", [])}
             if settings.document_bucket not in buckets:
                 if settings.aws_region == "us-east-1":

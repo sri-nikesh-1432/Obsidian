@@ -44,12 +44,31 @@ STATIC_DIR = os.environ.get("OBSIDIAN_STATIC_DIR", "")
 
 ALLOWED_ORIGINS = set(settings.origins)
 
+# Surface object-store/persistence configuration on /health so a silent
+# fallback to the in-memory (non-durable) emulation is remotely visible.
+_CONFIG_WARNING = ""
+if settings.storage_backend in ("kv", "workers-kv", "workers_kv") and not settings.kv_configured:
+    _CONFIG_WARNING = (
+        "OBSIDIAN_STORAGE_BACKEND=kv but Cloudflare KV is not fully configured "
+        "(set OBSIDIAN_CF_ACCOUNT_ID, OBSIDIAN_CF_API_TOKEN and OBSIDIAN_KV_NAMESPACE_ID); "
+        "falling back to in-memory S3 - data will NOT persist across restarts."
+    )
+elif settings.storage_backend == "r2" and not settings.r2_configured:
+    _CONFIG_WARNING = (
+        "OBSIDIAN_STORAGE_BACKEND=r2 but R2 is not fully configured; "
+        "falling back to in-memory S3 - data will NOT persist across restarts."
+    )
+
 HEALTH_BODY = json.dumps({
     "status": "ok",
     "service": "obsidian-api",
     "version": "0.1.0",
     "environment": settings.env,
     "port": PORT,
+    "storage_backend": settings.storage_backend,
+    "cloud_object_store": settings.cloud_object_store,
+    "durable_state": settings.state_persistence_enabled,
+    "config_warning": _CONFIG_WARNING,
 }).encode("utf-8")
 
 HEALTH_HTML = b"""<!doctype html>
