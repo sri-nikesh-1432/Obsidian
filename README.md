@@ -357,6 +357,40 @@ S3 and KMS are served in-process by moto, so the *same* handlers that deploy to
 Lambda run unchanged and no AWS account is needed. Google sign-in, SMTP email
 and Razorpay are switched on purely by environment variables.
 
+### Live deployment (Render + Netlify)
+
+The public demo runs the API on **Render** (one container, in-process AWS) and
+the SPA on **Netlify**, which proxies `/api/v1/*` to Render so the browser stays
+same-origin (`netlify.toml`). `render.yaml` declares the service and its
+environment; the one secret is entered in the dashboard, never committed.
+
+| URL | Role |
+| --- | ---- |
+| `https://obsidiancloud.netlify.app` | SPA + `/api/v1/*` proxy → Render |
+| `https://obsidian-abax.onrender.com` | API (single container) |
+
+**Render environment** (Dashboard → your service → *Environment*):
+
+| Variable | Value |
+| -------- | ----- |
+| `OBSIDIAN_STORAGE_BACKEND` | `kv` |
+| `OBSIDIAN_CF_ACCOUNT_ID` | your Cloudflare account id |
+| `OBSIDIAN_CF_API_TOKEN` | a Workers KV **Edit** token — *secret, never commit* |
+| `OBSIDIAN_KV_NAMESPACE_ID` | your Workers KV namespace id |
+| `OBSIDIAN_ALLOWED_ORIGINS` | `https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com` |
+| `OBSIDIAN_PERSIST_STATE` | `true` |
+| `OBSIDIAN_PERSIST_INTERVAL` | `20` |
+
+With `OBSIDIAN_STORAGE_BACKEND=kv` set, document bodies **and** the whole
+database snapshot live in Workers KV, so a Render restart or redeploy keeps every
+account and document (see *Durable state*). Saving environment changes triggers a
+redeploy. The keep-alive workflow (`.github/workflows/keepalive.yml`) pings the
+API so the free instance does not sleep.
+
+**Verify routing:** `https://obsidiancloud.netlify.app/` returns the SPA (200)
+and `https://obsidiancloud.netlify.app/api/v1/auth/me` proxies to Render
+(`200 {"authenticated": false}` when signed out).
+
 ---
 
 ## Deploy to AWS (S3 · KMS · DynamoDB · API Gateway · Lambda)
@@ -452,6 +486,8 @@ Delivery order is Resend → SMTP → local dev mailbox.
 | `OBSIDIAN_STORAGE_BACKEND` | `s3` | `s3` (AWS S3 / moto), `r2` (Cloudflare R2), or `kv` (Cloudflare Workers KV — see above) |
 | `OBSIDIAN_R2_ENDPOINT` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_REGION` | *(empty)* / `auto` | Cloudflare R2 S3 credentials and endpoint |
 | `OBSIDIAN_CF_ACCOUNT_ID` / `OBSIDIAN_CF_API_TOKEN` / `OBSIDIAN_KV_NAMESPACE_ID` | *(empty)* | Cloudflare Workers KV object store (cardless) |
+| `OBSIDIAN_PERSIST_STATE` | auto — on when a Cloudflare credential is present | Snapshot the in-memory database to Cloudflare so restarts keep all data |
+| `OBSIDIAN_PERSIST_INTERVAL` | `20` | Seconds between durable-state write-backs |
 | `OBSIDIAN_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` | *(empty)* / `587` | SMTP delivery for real OTP email |
 | `RAZORPAY_KEY_ID` / `_KEY_SECRET` / `_WEBHOOK_SECRET` | *(empty)* | Storage payments. Unset ⇒ simulated checkout in dev mode only |
 | `LLM_PROVIDER` | `ollama` | `ollama` or any OpenAI-compatible provider |
@@ -518,6 +554,7 @@ tests/e2e_smoke.py   end-to-end smoke against the running stack
 Dockerfile            single-container deploy (frontend + API, no cloud creds)
 docker-compose.yml    one-command deploy
 netlify.toml          static frontend deploy
+render.yaml           Render blueprint (API service + environment)
 infra/template.yaml   AWS SAM stack (S3 · KMS · DynamoDB · API Gateway · Lambda)
 docs/DEPLOY.md        deploy guide for every target
 ```

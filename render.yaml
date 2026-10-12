@@ -1,0 +1,35 @@
+# Render blueprint for the OBSIDIAN API (single-container, in-process AWS).
+#
+# Optional: use this only if you manage the service as a Render Blueprint. The
+# live service is already running; if you created it by hand, set the values
+# below in the dashboard instead (Dashboard -> your service -> Environment) —
+# this file does not affect an existing manually-created service.
+#
+# The Netlify origin must be listed in OBSIDIAN_ALLOWED_ORIGINS: the SPA proxies
+# /api/v1/* to this service so the browser stays same-origin.
+#
+# OBSIDIAN_CF_API_TOKEN is a secret: it is marked sync=false, so Render prompts
+# for it in the dashboard and it is never read from this file or committed.
+services:
+  - type: web
+    name: obsidian-abax
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OBSIDIAN_STORAGE_BACKEND
+        value: kv
+      - key: OBSIDIAN_CF_ACCOUNT_ID
+        value: eb221ad5ca5c0e795f1d7895313b4225
+      - key: OBSIDIAN_KV_NAMESPACE_ID
+        value: 53bc67b2e1b54472bbaa55302ffc1125
+      - key: OBSIDIAN_ALLOWED_ORIGINS
+        value: https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com
+      - key: OBSIDIAN_PERSIST_STATE
+        value: "true"
+      - key: OBSIDIAN_PERSIST_INTERVAL
+        value: "20"
+      - key: OBSIDIAN_CF_API_TOKEN
+        sync: false
