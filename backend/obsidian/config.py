@@ -108,6 +108,14 @@ class Settings:
     razorpay_key_secret: str = field(default_factory=lambda: os.environ.get("RAZORPAY_KEY_SECRET", ""))
     razorpay_webhook_secret: str = field(default_factory=lambda: os.environ.get("RAZORPAY_WEBHOOK_SECRET", ""))
 
+    # Administrative access. Only these email addresses may hold the admin
+    # role. Comma separated; the special value "*" allows any address (used
+    # only by the test suite). Admin self-registration is restricted to this
+    # allowlist in every environment, and an existing admin account whose
+    # address is no longer listed cannot sign in.
+    admin_emails: str = field(default_factory=lambda: os.environ.get(
+        "OBSIDIAN_ADMIN_EMAILS", "srinikeshchinta@gmail.com"))
+
     # Local dev / demo: scale up rate limits so seeding & smoke tests aren't
     # blocked by in-process counters. Never enabled in production.
     relax_rate_limits: bool = field(default_factory=lambda: _bool("OBSIDIAN_RELAX_RATE_LIMITS", False))
@@ -207,6 +215,17 @@ class Settings:
     @is_prod.setter
     def is_prod(self, value: bool) -> None:
         self._is_prod_override = value
+
+    @property
+    def admin_allowlist(self) -> set[str]:
+        return {e.strip().lower() for e in self.admin_emails.split(",") if e.strip()}
+
+    def is_allowed_admin_email(self, email: str) -> bool:
+        """True when ``email`` may hold the admin role in this environment."""
+        allow = self.admin_allowlist
+        if "*" in allow:
+            return True
+        return (email or "").strip().lower() in allow
 
     @property
     def r2_configured(self) -> bool:

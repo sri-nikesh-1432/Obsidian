@@ -185,6 +185,65 @@ export interface AdminAnalytics {
   health: Record<string, string>
 }
 
+export interface AdminInsights {
+  generated_at: string
+  users: {
+    total: number
+    by_role: Record<string, number>
+    active: number
+    logged_in: number
+    mfa_enabled: number
+    ai_enabled: number
+    new_last_7d: number
+  }
+  sessions: { active: number; logged_in_users: number }
+  documents: {
+    total: number
+    storage_bytes: number
+    public: number
+    private: number
+    profile_visible: number
+    raggable: number
+    by_type: Record<string, number>
+  }
+  shares: { total: number; active: number; expired: number; revoked: number }
+  groups: { total: number; memberships: number; messages: number }
+  rag: { instances: number; enabled: number; chunks: number }
+  payments: {
+    orders_total: number
+    paid: number
+    pending: number
+    failed: number
+    revenue_inr: number
+    pending_inr: number
+    avg_order_inr: number
+    by_status: Record<string, number>
+    by_tier: Record<string, number>
+    recent: {
+      order_id: string
+      email: string
+      plan: string
+      amount_inr: number
+      status: string
+      created_at: string
+      paid_at: string
+    }[]
+  }
+  series: { date: string; signups: number; uploads: number; logins: number }[]
+  security: Record<string, number>
+  health: Record<string, string>
+}
+
+export interface AdminIntelligenceAnswer {
+  question: string
+  answer: string
+  facts: string[]
+  suggestions: string[]
+  model_mode: string
+  generated_at: string
+  metrics?: AdminInsights
+}
+
 export interface GroupSummary {
   group_id: string
   name: string

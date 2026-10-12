@@ -21,7 +21,7 @@ export default function Login() {
     setError('')
     setLoading(true)
     try {
-      const data = await api<{ challenge_id: string; email: string; dev_otp?: string }>(
+      const data = await api<{ challenge_id: string; email: string }>(
         '/auth/login',
         { method: 'POST', body: { email, password, role } },
       )

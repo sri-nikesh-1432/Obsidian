@@ -17,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 os.environ.setdefault("OBSIDIAN_LOCAL_AWS", "true")
 os.environ.setdefault("OBSIDIAN_DEV_MODE", "true")
+# Tests provision admin accounts generically, so allow any admin address here.
+os.environ.setdefault("OBSIDIAN_ADMIN_EMAILS", "*")
 os.environ["OBSIDIAN_TABLE_PREFIX"] = "obsidian-test"
 
 from obsidian import aws            # noqa: E402

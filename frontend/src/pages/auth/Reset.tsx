@@ -7,7 +7,6 @@ import { useToast } from '../../store/toast'
 
 interface ResetState {
   challenge_id: string
-  dev_otp?: string
 }
 
 export default function Reset() {
@@ -16,7 +15,7 @@ export default function Reset() {
   const toast = useToast()
   const state = location.state as ResetState | null
 
-  const [code, setCode] = useState(state?.dev_otp ?? '')
+  const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)

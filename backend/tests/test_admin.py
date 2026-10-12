@@ -79,3 +79,58 @@ def test_admin_can_list_users_but_not_documents():
     # there is deliberately no admin endpoint that returns document contents
     anon = Client()
     assert anon.get("/api/v1/admin/documents")[0] == 404
+
+
+def test_admin_registration_is_allowlisted(monkeypatch):
+    """Only allowlisted addresses may register the admin role."""
+    from obsidian.config import settings
+    allowed = f"owner-{uuid.uuid4().hex[:8]}@obsidian.test"
+    monkeypatch.setattr(settings, "admin_emails", allowed)
+
+    intruder = Client()
+    status, _ = intruder.post("/api/v1/auth/register", {
+        "role": "admin", "email": f"intruder-{uuid.uuid4().hex[:8]}@obsidian.test",
+        "password": "correct-horse-battery", "full_name": "Intruder",
+    })
+    assert status == 403
+
+    owner = Client()
+    register(owner, role="admin", email=allowed, name="Owner")
+    status, me = owner.get("/api/v1/auth/me")
+    assert status == 200
+    assert me["role"] == "admin"
+    # admins never go through the end-user onboarding wizard
+    assert me["onboarding_complete"] is True
+
+
+def test_admin_insights_and_intelligence():
+    admin = _admin()
+    student = Client()
+    register(student)
+
+    status, data = admin.get("/api/v1/admin/insights")
+    assert status == 200, data
+    for key in ("users", "sessions", "documents", "shares", "groups", "payments",
+                "series", "security", "health"):
+        assert key in data, key
+    assert len(data["series"]) == 14
+    assert "revenue_inr" in data["payments"]
+
+    status, ans = admin.post("/api/v1/admin/intelligence",
+                             {"question": "What is our revenue and payments?"})
+    assert status == 200, ans
+    assert ans["model_mode"] == "grounded-analytics"
+    assert "metrics" in ans and "answer" in ans
+    assert "payment" in ans["answer"].lower() or "revenue" in ans["answer"].lower()
+
+    # a non-admin can never reach the assistant
+    other = Client()
+    register(other)
+    assert other.post("/api/v1/admin/intelligence", {"question": "hi"})[0] == 403
+    assert other.post("/api/v1/admin/intelligence", {"question": ""})[0] == 403
+
+
+def test_admin_intelligence_requires_question():
+    admin = _admin()
+    status, _ = admin.post("/api/v1/admin/intelligence", {"question": "  "})
+    assert status in (400, 422)

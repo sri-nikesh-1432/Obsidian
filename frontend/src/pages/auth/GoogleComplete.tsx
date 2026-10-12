@@ -16,7 +16,9 @@ export default function GoogleComplete() {
       // small delay so the auth state is applied
       setTimeout(() => {
         const me = user
-        if (me && !me.onboarding_complete) navigate('/onboarding', { replace: true })
+        if (me && !me.onboarding_complete && me.role !== 'admin') {
+          navigate('/onboarding', { replace: true })
+        }
       }, 0)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -28,7 +30,8 @@ export default function GoogleComplete() {
       navigate('/login?next=%2Fapp%2Fdashboard', { replace: true })
       return
     }
-    navigate(user.onboarding_complete ? homePathFor(user.role) : '/onboarding', { replace: true })
+    const onboarded = Boolean(user.onboarding_complete) || user.role === 'admin'
+    navigate(onboarded ? homePathFor(user.role) : '/onboarding', { replace: true })
   }, [user, loading, navigate])
 
   return (

@@ -103,7 +103,11 @@ def _challenge_response(challenge: dict, purpose: str) -> dict:
         "email": challenge["email"],
         "expires_in": settings.otp_ttl_seconds,
     }
-    if settings.dev_mode:  # local development only: surface the code for testing
+    # Surface the code to the client ONLY when nothing can actually deliver it
+    # (no Resend key, no SMTP relay) and we are in dev mode. As soon as a real
+    # mail channel is configured the code never leaves the backend, even if
+    # OBSIDIAN_DEV_MODE is still on.
+    if settings.dev_mode and mailer.delivery_channel() == "dev":
         body["dev_otp"] = challenge["_otp"]
     return body
 
@@ -186,8 +190,9 @@ def register(req: RequestContext) -> dict:
         raise invalid_input("Please enter a valid email address.")
     if len(password) < MIN_PASSWORD_LEN or len(password) > 200:
         raise invalid_input(f"Password must be at least {MIN_PASSWORD_LEN} characters.")
-    if role == "admin" and not settings.dev_mode:
-        # Admin accounts are bootstrapped, never self-registered in production.
+    if role == "admin" and not settings.is_allowed_admin_email(email):
+        # Only allowlisted addresses may be provisioned as admin — in every
+        # environment, and never by simply choosing the role at signup.
         from ..errors import access_denied
         raise access_denied()
 
@@ -223,7 +228,9 @@ def request_otp(req: RequestContext) -> dict:
 
     if purpose == "login" and EMAIL_RE.match(email):
         user = find_user_by_email(email)
-        if user and user.get("status") == "active":
+        if (user and user.get("status") == "active"
+                and (user.get("role") != "admin"
+                     or settings.is_allowed_admin_email(user.get("email", "")))):
             challenge = _create_challenge("login", user["email"], user_id=user["user_id"])
             return _challenge_response(challenge, "login")
 
@@ -259,7 +266,7 @@ def _complete_registration(req: RequestContext, challenge: dict) -> dict:
         raise ApiError("EMAIL_TAKEN", "An account with this email already exists.", 409)
 
     role = payload.get("role", "student")
-    if role == "admin" and not settings.dev_mode:
+    if role == "admin" and not settings.is_allowed_admin_email(email):
         from ..errors import access_denied
         raise access_denied()
 
@@ -270,7 +277,9 @@ def _complete_registration(req: RequestContext, challenge: dict) -> dict:
         "user_id": user_id, "email": email, "role": role,
         "status": "active", "password_hash": payload.get("password_hash", ""),
         "mfa_enabled": True, "ai_enabled": False,
-        "onboarding_complete": False,
+        # Administrators run the platform, they are not onboarded like end
+        # users — no profile wizard, no personal-AI consent step.
+        "onboarding_complete": role == "admin",
         "verification_status": initial_verification(role, settings.dev_mode),
         "google_subject": "", "created_at": now, "updated_at": now,
         "last_login_at": now,
@@ -320,6 +329,9 @@ def _complete_login(req: RequestContext, challenge: dict) -> dict:
     user = find_user_by_email(challenge["email"])
     if not user or user.get("status") != "active":
         raise ApiError("INVALID_INPUT", "This sign-in request is no longer valid.", 400)
+    if user.get("role") == "admin" and not settings.is_allowed_admin_email(user.get("email", "")):
+        from ..errors import access_denied
+        raise access_denied()
     now = datetime.now(timezone.utc).isoformat()
     aws.table("users").update_item(
         Key={"pk": user["pk"], "sk": "META"},
@@ -367,6 +379,15 @@ def login(req: RequestContext) -> dict:
         raise ApiError("INVALID_CREDENTIALS", "Incorrect email or password.", 401)
     if user.get("status") != "active":
         raise ApiError("ACCESS_DENIED", "This account is not active.", 403)
+    if user.get("role") == "admin" and not settings.is_allowed_admin_email(user.get("email", "")):
+        # An admin account that is no longer on the allowlist cannot sign in.
+        # The failed attempt is recorded like any other denied sign-in.
+        audit.write_event(
+            actor_id=user["user_id"], actor_role=user["role"], event_type="login_failure",
+            resource_type="user", resource_id=user["user_id"], result="failure",
+            request_id=req.request_id, metadata={"reason": "admin_not_allowlisted"},
+        )
+        raise ApiError("ACCESS_DENIED", "This admin account is not authorized.", 403)
 
     # Role is selected before sign-in; the server decides whether the
     # credential actually belongs to an account with that role.
@@ -506,9 +527,16 @@ def password_forgot(req: RequestContext) -> dict:
         user = find_user_by_email(email)
         if user:
             challenge = _create_challenge("password_reset", user["email"], user_id=user["user_id"])
-            if settings.dev_mode:
-                body["challenge_id"] = challenge["challenge_id"]
+            # The client needs the challenge id to submit the emailed code. It
+            # is an opaque handle on its own, so returning it is safe.
+            body["challenge_id"] = challenge["challenge_id"]
+            if settings.dev_mode and mailer.delivery_channel() == "dev":
                 body["dev_otp"] = challenge["_otp"]
+        else:
+            # Return a decoy id so an attacker cannot tell whether an account
+            # exists. It never matches a real challenge and simply fails to
+            # verify, exactly like a wrong code.
+            body["challenge_id"] = uuid_hex()
     return body
 
 
@@ -617,13 +645,15 @@ def google_callback(req: RequestContext) -> tuple:
         raise ApiError("INVALID_INPUT", "Google did not return a verified email address.", 400)
 
     user = find_user_by_email(email)
+    if user and user.get("role") == "admin" and not settings.is_allowed_admin_email(email):
+        from ..errors import access_denied
+        raise access_denied()
     now = datetime.now(timezone.utc).isoformat()
     if not user:
         role = state_item.get("role", "student")
-        # Mirror the OTP registration path: admin accounts are provisioned
-        # through a trusted authorization path, never self-registered. Google
-        # still signs in an *existing* admin — this only guards new accounts.
-        if role == "admin" and not settings.dev_mode:
+        # Mirror the OTP registration path: only allowlisted addresses may be
+        # provisioned as admin.
+        if role == "admin" and not settings.is_allowed_admin_email(email):
             from ..errors import access_denied
             raise access_denied()
         user_id = uuid_hex()
@@ -632,7 +662,7 @@ def google_callback(req: RequestContext) -> tuple:
             "user_id": user_id, "email": email, "role": role,
             "status": "active", "password_hash": "",
             "mfa_enabled": True, "ai_enabled": False,
-            "onboarding_complete": False,
+            "onboarding_complete": role == "admin",
             "verification_status": initial_verification(role, settings.dev_mode),
             "google_subject": info.get("sub", ""),
             "created_at": now, "updated_at": now, "last_login_at": now,

@@ -7,7 +7,6 @@ import { Button, Field, Input } from '../../components/ui'
 export default function Forgot() {
   const [email, setEmail] = useState('')
   const [sent, setSent] = useState(false)
-  const [dev, setDev] = useState<{ challenge_id: string; dev_otp?: string } | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
@@ -17,12 +16,15 @@ export default function Forgot() {
     setError('')
     setLoading(true)
     try {
-      const data = await api<any>('/auth/password/forgot', {
+      const data = await api<{ challenge_id?: string }>('/auth/password/forgot', {
         method: 'POST',
         body: { email },
       })
+      if (data.challenge_id) {
+        navigate('/reset', { state: { challenge_id: data.challenge_id } })
+        return
+      }
       setSent(true)
-      if (data.challenge_id) setDev({ challenge_id: data.challenge_id, dev_otp: data.dev_otp })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Request failed.')
     } finally {
@@ -66,15 +68,6 @@ export default function Forgot() {
         <div className="panel-solid rounded-2xl p-5 text-sm text-muted leading-relaxed">
           If an account exists for that email, a reset code is on its way. It expires in
           5 minutes.
-          {dev?.dev_otp && (
-            <button
-              type="button"
-              onClick={() => navigate('/reset', { state: dev })}
-              className="mt-4 w-full rounded-xl border border-dashed border-cognac/40 bg-cognac/5 px-4 py-2.5 text-[13px] text-cognac-deep hover:bg-cognac/10 transition-colors focus-ring"
-            >
-              Dev mode — continue with code <span className="font-semibold tracking-widest">{dev.dev_otp}</span>
-            </button>
-          )}
         </div>
       )}
     </AuthLayout>

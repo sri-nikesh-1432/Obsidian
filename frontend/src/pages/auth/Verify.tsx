@@ -11,7 +11,6 @@ interface VerifyState {
   email: string
   purpose: 'signup' | 'login'
   role: string
-  dev_otp?: string
   next?: string
 }
 
@@ -56,7 +55,8 @@ export default function Verify() {
       }
 
       await refresh()
-      if (!data.onboarding_complete) {
+      const onboarded = Boolean(data.onboarding_complete) || data.role === 'admin'
+      if (!onboarded) {
         navigate('/onboarding', { replace: true })
       } else {
         navigate(state.next || homePathFor(data.role), { replace: true })
@@ -73,16 +73,11 @@ export default function Verify() {
     setResending(true)
     setError('')
     try {
-      const data = await api<{ dev_otp?: string }>('/auth/otp/request', {
+      await api('/auth/otp/request', {
         method: 'POST',
         body: { challenge_id: state.challenge_id },
       })
-      if (data.dev_otp) {
-        state.dev_otp = data.dev_otp
-        toast.push('info', `Dev mode — new code: ${data.dev_otp}`)
-      } else {
-        toast.push('success', 'A new code has been sent.')
-      }
+      toast.push('success', 'A new code has been sent.')
       setSeconds(30)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not resend the code.')
@@ -123,16 +118,6 @@ export default function Verify() {
             onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
           />
         </Field>
-
-        {state.dev_otp && (
-          <button
-            type="button"
-            onClick={() => setCode(state.dev_otp!)}
-            className="w-full rounded-xl border border-dashed border-cognac/40 bg-cognac/5 px-4 py-2.5 text-[13px] text-cognac-deep hover:bg-cognac/10 transition-colors focus-ring"
-          >
-            Dev mode — use code <span className="font-semibold tracking-widest">{state.dev_otp}</span>
-          </button>
-        )}
 
         {error && (
           <div className="rounded-xl border border-danger/25 bg-danger/6 px-4 py-3 text-sm text-danger">

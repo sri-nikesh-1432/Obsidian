@@ -171,7 +171,7 @@ def main() -> None:
     # ---------------- faculty / recruiter / admin ----------------
     faculty = register("faculty", "prof.rao@obsidian.dev", "Prof. Rao")
     recruiter = register("recruiter", "talent@northwind.io", "Dana Cole")
-    admin = register("admin", "admin@obsidian.dev", "System Admin")
+    admin = register("admin", "srinikeshchinta@gmail.com", "System Admin")
 
     # ---------------- report ----------------
     code, me = student.call("GET", "/auth/me")
@@ -182,7 +182,7 @@ def main() -> None:
     print("  Student   meera@obsidian.dev")
     print("  Faculty   prof.rao@obsidian.dev")
     print("  Recruiter talent@northwind.io")
-    print("  Admin     admin@obsidian.dev")
+    print("  Admin     srinikeshchinta@gmail.com")
     print("  " + "-" * 64)
     print("  Sign-in needs an email OTP — in dev mode it is shown in the UI.")
 

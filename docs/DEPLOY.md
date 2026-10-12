@@ -56,8 +56,11 @@ docker run -p 8080:8080 --env-file .env obsidian
 > complete without an email provider and payments can be simulated. Set
 > `OBSIDIAN_DEV_MODE=false` once SMTP and Razorpay are configured. (Also note
 > the in-process AWS mock is in memory by default — data resets when the
-> container does. Configure a Cloudflare object store to snapshot/restore it
-> across restarts, or use option 2 for real durable storage.)
+> container does. The image already sets the Workers-KV backend, its account
+> and namespace ids and `OBSIDIAN_PERSIST_STATE=true`, so durable state switches
+> on the moment you add `OBSIDIAN_CF_API_TOKEN` (Workers KV **Edit**) — check
+> `/health` for `"durable_state": true`. Or use option 2 for real durable
+> storage.)
 
 ### Run without Docker
 

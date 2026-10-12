@@ -44,6 +44,27 @@ ENV OBSIDIAN_LOCAL_AWS=true \
     OBSIDIAN_API_BASE_URL=https://obsidiancloud.netlify.app/api/v1 \
     OBSIDIAN_ALLOWED_ORIGINS=https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com
 
+# Only the numeric Cloudflare identifier is baked in below. Durable state (so
+# accounts and sessions survive a restart) turns on automatically the moment
+# OBSIDIAN_CF_API_TOKEN is provided: the Workers-KV backend and the KV
+# namespace are already configured here. Without the token the service logs a
+# warning and falls back to the in-memory store (non-durable), which is fine
+# for a throwaway local container.
+ENV OBSIDIAN_STORAGE_BACKEND=kv \
+    OBSIDIAN_CF_ACCOUNT_ID=eb221ad5ca5c0e795f1d7895313b4225 \
+    OBSIDIAN_KV_NAMESPACE_ID=53bc67b2e1b54472bbaa55302ffc1125 \
+    OBSIDIAN_PERSIST_STATE=true \
+    OBSIDIAN_PERSIST_INTERVAL=20 \
+    OBSIDIAN_ADMIN_EMAILS=srinikeshchinta@gmail.com \
+    OBSIDIAN_FROM_EMAIL=OBSIDIAN <onboarding@resend.dev>
+
+# OTP email delivery. Providing RESEND_API_KEY (Resend API key, "Sending
+# access") is the ONLY thing needed to send real one-time codes: every OTP is
+# then emailed from the backend and never returned to the browser. Until the
+# key is set the code is surfaced in dev responses so local sign-in still works.
+# OBSIDIAN_FROM_EMAIL must use a domain verified in Resend to reach arbitrary
+# inboxes; the sandbox default only delivers to the Resend account owner.
+
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

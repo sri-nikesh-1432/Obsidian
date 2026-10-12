@@ -50,10 +50,12 @@ function RequireAuth({ children }: { children: ReactNode }) {
 
   if (loading) return <FullPageLoader />
   if (!user) return <Navigate to={`/login?next=${encodeURIComponent(location.pathname)}`} replace />
-  if (!user.onboarding_complete && location.pathname !== '/onboarding') {
+  // Administrators are never sent through the end-user onboarding wizard.
+  const onboarded = Boolean(user.onboarding_complete) || user.role === 'admin'
+  if (!onboarded && location.pathname !== '/onboarding') {
     return <Navigate to="/onboarding" replace />
   }
-  if (user.onboarding_complete && location.pathname === '/onboarding') {
+  if (onboarded && location.pathname === '/onboarding') {
     return <Navigate to={homePathFor(user.role)} replace />
   }
   return <>{children}</>

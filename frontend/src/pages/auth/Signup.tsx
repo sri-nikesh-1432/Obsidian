@@ -20,7 +20,7 @@ export default function Signup() {
     setError('')
     setLoading(true)
     try {
-      const data = await api<{ challenge_id: string; email: string; dev_otp?: string }>(
+      const data = await api<{ challenge_id: string; email: string }>(
         '/auth/register',
         { method: 'POST', body: { role, email, password, full_name: name } },
       )

@@ -166,7 +166,9 @@ def user_summary(user: dict) -> dict:
         "status": user.get("status", "active"),
         "mfa_enabled": bool(user.get("mfa_enabled", True)),
         "ai_enabled": bool(user.get("ai_enabled", False)),
-        "onboarding_complete": bool(user.get("onboarding_complete", False)),
+        # Administrators never go through the end-user onboarding wizard, even
+        # if an older account predates that rule.
+        "onboarding_complete": bool(user.get("onboarding_complete", False)) or role == "admin",
         "verification_status": user.get("verification_status", "verified"),
         "created_at": user.get("created_at", ""),
         "last_login_at": user.get("last_login_at", ""),

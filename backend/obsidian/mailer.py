@@ -92,8 +92,15 @@ def _send_resend(to: str, subject: str, html: str, text: str) -> bool:
             },
             timeout=15.0,
         )
+        if resp.status_code >= 300:
+            # Surface the reason (e.g. an unverified domain) without leaking the
+            # key or the recipient's code. Resend returns a JSON error body.
+            print(f"[obsidian] Resend send failed: HTTP {resp.status_code} "
+                  f"{resp.text[:300]}", file=__import__('sys').stderr)
         return resp.status_code < 300
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - report type only, never credentials
+        print(f"[obsidian] Resend send error: {type(exc).__name__}",
+              file=__import__('sys').stderr)
         return False
 
 

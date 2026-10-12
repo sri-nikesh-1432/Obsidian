@@ -76,7 +76,7 @@ Password for all accounts: **`correct-horse-battery`**
 | Student   | `meera@obsidian.dev`      |
 | Faculty   | `prof.rao@obsidian.dev`   |
 | Recruiter | `talent@northwind.io`     |
-| Admin     | `admin@obsidian.dev`      |
+| Admin     | `srinikeshchinta@gmail.com` |
 
 Sign-in uses an **email one-time code (OTP)**. In dev mode the code is returned
 by the API and surfaced in the UI, so no email is sent. Choose the role that
@@ -96,12 +96,28 @@ role (never a client-supplied one). The field definitions live in
 | Student   | name, phone, institution, course, education level, department, year, graduation year, CGPA, skills, bio, profile visibility |
 | Faculty   | name, institution, faculty/employee ID, department, designation, areas of expertise, office contact, bio |
 | Recruiter | name, company, job title, industry, company website, hiring domains, contact number |
-| Admin     | name, admin/operations designation, organization |
+| Admin     | *(none — administrators skip onboarding entirely)* |
 
 A role can only set the fields belonging to it — a faculty account sending
-`cgpa` gets `422`, and never receives student fields back. **Admin accounts
-cannot be self-registered in production**; they are provisioned through a
-trusted authorization path.
+`cgpa` gets `422`, and never receives student fields back.
+
+**Administrators never see the onboarding wizard.** An admin account is created
+with `onboarding_complete = true`, and both the API and the client route guards
+send an admin straight to `/app/admin`.
+
+### Who can be an admin
+
+Admin access is gated by an **email allowlist** (`OBSIDIAN_ADMIN_EMAILS`,
+comma-separated; default `srinikeshchinta@gmail.com`). This applies in every
+environment and on every path — OTP registration, Google sign-up and
+sign-in:
+
+- registering as `admin` is rejected (`403`) unless the address is listed;
+- an existing admin whose address is no longer listed **cannot sign in**;
+- non-admins can never widen their own role.
+
+Set `OBSIDIAN_ADMIN_EMAILS` to a comma-separated list to nominate more admins,
+or to `*` to allow any address (the test suite uses `*`).
 
 ---
 
@@ -138,8 +154,8 @@ accounts.google.com ──▶ GET {PUBLIC}/api/v1/auth/google/callback?code&stat
 - **Sign-in vs sign-up** — one flow: an existing email signs in, a new email is
   created with the chosen role and a role-specific profile row. Wired for every
   role on `/login`, `/signup` and the landing page (`GoogleAuthButton`).
-- **Admin** — Google signs in an *existing* admin; a **new** admin account is not
-  self-registered in production (dev mode allows it), matching the OTP path.
+- **Admin** — only an address on `OBSIDIAN_ADMIN_EMAILS` may be created as, or
+  signed in as, an admin; any other admin request is rejected, matching the OTP path.
 - **Where the client lives** — `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` come
   from the environment or from AWS Secrets Manager via `OBSIDIAN_SECRET_NAME`.
   The browser only ever receives the authorization URL.
@@ -217,6 +233,24 @@ all survive a restart or redeploy**.
 - Auto-enabled whenever `OBSIDIAN_CF_API_TOKEN` (or R2 credentials) are
   present; set `OBSIDIAN_PERSIST_STATE=false` to opt out. It is a no-op against
   real AWS, which is already durable.
+
+**This is the fix for "why do I get signed out when I refresh?"** The Render
+free tier restarts (and sleeps) the container, which wipes the in-memory
+database — taking every account and session with it, so *all* signed-in users
+drop at once. Enabling durable state means the snapshot is restored on the next
+boot, so sessions and accounts survive.
+
+The Docker image already bakes in the Workers-KV backend, the account id, the
+namespace id and `OBSIDIAN_PERSIST_STATE=true`. The **only** value left to
+provide is the secret:
+
+> Render → your service → **Environment** → add `OBSIDIAN_CF_API_TOKEN`
+> (a Cloudflare token with **Workers KV Storage: Edit**). Save; Render redeploys
+> and `/health` flips from `"durable_state": false` to `true`.
+
+Verify with `curl https://<your-api>/health` — you want `"durable_state": true`
+and an empty `"config_warning"`. The same three non-secret values can instead be
+set on any host (see the env-var table).
 
 **Trade-off:** the write-back is bounded by `OBSIDIAN_PERSIST_INTERVAL`, so a
 hard crash (not a clean restart) can lose the last few seconds of changes, and
@@ -380,6 +414,7 @@ environment; the one secret is entered in the dashboard, never committed.
 | `OBSIDIAN_ALLOWED_ORIGINS` | `https://obsidiancloud.netlify.app,https://obsidian-abax.onrender.com` |
 | `OBSIDIAN_PERSIST_STATE` | `true` |
 | `OBSIDIAN_PERSIST_INTERVAL` | `20` |
+| `OBSIDIAN_ADMIN_EMAILS` | `srinikeshchinta@gmail.com` |
 
 With `OBSIDIAN_STORAGE_BACKEND=kv` set, document bodies **and** the whole
 database snapshot live in Workers KV, so a Render restart or redeploy keeps every
@@ -486,6 +521,7 @@ Delivery order is Resend → SMTP → local dev mailbox.
 | `OBSIDIAN_STORAGE_BACKEND` | `s3` | `s3` (AWS S3 / moto), `r2` (Cloudflare R2), or `kv` (Cloudflare Workers KV — see above) |
 | `OBSIDIAN_R2_ENDPOINT` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_REGION` | *(empty)* / `auto` | Cloudflare R2 S3 credentials and endpoint |
 | `OBSIDIAN_CF_ACCOUNT_ID` / `OBSIDIAN_CF_API_TOKEN` / `OBSIDIAN_KV_NAMESPACE_ID` | *(empty)* | Cloudflare Workers KV object store (cardless) |
+| `OBSIDIAN_ADMIN_EMAILS` | `srinikeshchinta@gmail.com` | Comma-separated allowlist of admin addresses (`*` = any). Gates admin registration and sign-in |
 | `OBSIDIAN_PERSIST_STATE` | auto — on when a Cloudflare credential is present | Snapshot the in-memory database to Cloudflare so restarts keep all data |
 | `OBSIDIAN_PERSIST_INTERVAL` | `20` | Seconds between durable-state write-backs |
 | `OBSIDIAN_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` | *(empty)* / `587` | SMTP delivery for real OTP email |
@@ -524,6 +560,35 @@ question → isolate to the user's own partition → hybrid retrieval
 
 ---
 
+## Administration console (admin only)
+
+`/app/admin` is a live operational dashboard. It is rebuilt from two endpoints
+and a set of existing admin feeds:
+
+- `GET /api/v1/admin/insights` — one aggregate snapshot (users by role,
+  sign-ins, uploads, storage, shares, groups, payments/revenue, security
+  counters and a 14-day time series). No document plaintext, ever.
+- `GET /api/v1/admin/analytics`, `/admin/users`, `/admin/security-events`,
+  `/admin/activity`, `/admin/shares`, `/admin/rag` — the detail tabs.
+- `POST /api/v1/admin/users/{id}/verification` — approve/withdraw a
+  faculty/recruiter account.
+
+The UI renders **pie/donut charts and 14-day bar charts** with inline SVG (no
+charting dependency) across tabs: **Overview**, **Analytics**, **Intelligence**,
+**Payments**, **Users**, **Security**, **System activity**, **Share links** and
+**Storage & AI**.
+
+### OBSIDIAN Intelligence — Administration
+
+Admins get their own assistant (`POST /api/v1/admin/intelligence`) that answers
+questions about the platform — *"what's our revenue?"*, *"how many signed in
+today?"*, *"how much storage is used?"* — grounded strictly in the aggregate
+metrics from `build_insights()`. It is **deterministic and read-only**: it can
+never read a document, a key, or another user's private data, and it never
+invents a number that is not in the snapshot.
+
+---
+
 ## Project layout
 
 ```
@@ -550,6 +615,8 @@ frontend/
   src/lib/roleProfile.ts   role-specific profile field definitions
   src/components/Markdown.tsx  lightweight answer renderer
   src/pages/student/Intelligence.tsx  conversational assistant UI
+  src/pages/role/Admin.tsx          admin console (charts + administration assistant)
+  src/components/Charts.tsx         dependency-free SVG pie/bar charts
 tests/e2e_smoke.py   end-to-end smoke against the running stack
 Dockerfile            single-container deploy (frontend + API, no cloud creds)
 docker-compose.yml    one-command deploy
@@ -563,8 +630,9 @@ docs/DEPLOY.md        deploy guide for every target
 
 - Embeddings are deterministic feature-hashing (offline, no external service).
   `EMBEDDING_MODEL` is reserved for wiring real provider embeddings.
-- Faculty/recruiter *verification* is not yet an approval workflow — accounts
-  are trusted on creation. Only admin self-registration is hard-blocked.
+- Faculty/recruiter *verification* starts `pending` in production and admins can
+  approve or withdraw it from the console; in dev mode accounts are trusted on
+  creation. Admin registration/sign-in is restricted to `OBSIDIAN_ADMIN_EMAILS`.
 - Assistant responses are not streamed yet (answers arrive complete).
 - Storage upgrades are one-time purchases, not auto-renewing subscriptions; a
   Razorpay subscription plan would be the next step.

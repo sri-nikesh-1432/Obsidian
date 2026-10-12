@@ -31,5 +31,11 @@ services:
         value: "true"
       - key: OBSIDIAN_PERSIST_INTERVAL
         value: "20"
+      - key: OBSIDIAN_ADMIN_EMAILS
+        value: srinikeshchinta@gmail.com
+      - key: OBSIDIAN_FROM_EMAIL
+        value: OBSIDIAN <onboarding@resend.dev>
       - key: OBSIDIAN_CF_API_TOKEN
+        sync: false
+      - key: RESEND_API_KEY
         sync: false
