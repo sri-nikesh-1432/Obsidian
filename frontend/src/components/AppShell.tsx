@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity, BookOpenCheck, ChevronDown, FileStack, FolderLock, HardDrive,
   LayoutDashboard, Link2, LogOut, Menu, ScanSearch, ShieldCheck, Sparkles,
-  UserRound, X,
+  UserRound, Users, X,
 } from 'lucide-react'
 import { useAuth, homePathFor } from '../store/auth'
 import { initials } from '../lib/format'
@@ -18,7 +18,14 @@ interface NavItem {
 }
 
 function primaryNavFor(role?: Role, aiEnabled?: boolean): NavItem[] {
-  if (role === 'faculty' || role === 'recruiter') {
+  if (role === 'faculty') {
+    return [
+      { to: '/app/home', label: 'Home', icon: LayoutDashboard, end: true },
+      { to: '/app/groups', label: 'Groups', icon: Users },
+      { to: '/app/find-student', label: 'Find a student', icon: ScanSearch },
+    ]
+  }
+  if (role === 'recruiter') {
     return [
       { to: '/app/home', label: 'Home', icon: LayoutDashboard, end: true },
       { to: '/app/find-student', label: 'Find a student', icon: ScanSearch },
@@ -32,6 +39,7 @@ function primaryNavFor(role?: Role, aiEnabled?: boolean): NavItem[] {
   const items: NavItem[] = [
     { to: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/app/vault', label: 'Documents', icon: FolderLock },
+    { to: '/app/groups', label: 'Groups', icon: Users },
     { to: '/app/links', label: 'Shared links', icon: Link2 },
     { to: '/app/activity', label: 'Activity', icon: Activity },
   ]

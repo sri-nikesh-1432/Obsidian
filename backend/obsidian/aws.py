@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 import boto3
+import httpx
 from boto3.dynamodb.conditions import Key, Attr  # noqa: F401  (re-exported for handlers)
 from botocore.config import Config
 
@@ -63,6 +65,20 @@ TABLES: dict[str, dict] = {
         "table": f"{P}-connections",
         "key": ("pk", "sk"),
         "gsis": [{"name": "gsi1", "hash": "gsi1pk", "range": "gsi1sk"}],
+    },
+    # Faculty-led groups + group chat. A single item collection per group:
+    #   pk=GROUP#<id>  sk=META          -> group metadata
+    #   pk=GROUP#<id>  sk=MEMBER#<uid>  -> membership row
+    #   pk=GROUP#<id>  sk=MSG#<ts>#<id> -> chat message (chronological)
+    # gsi1 lists groups owned by a faculty member; gsi2 lists the groups a
+    # student belongs to.
+    "groups": {
+        "table": f"{P}-groups",
+        "key": ("pk", "sk"),
+        "gsis": [
+            {"name": "gsi1", "hash": "gsi1pk", "range": "gsi1sk"},
+            {"name": "gsi2", "hash": "gsi2pk", "range": "gsi2sk"},
+        ],
     },
     "audit": {
         "table": f"{P}-audit",
@@ -148,24 +164,91 @@ def _r2_client():
 
 
 def storage_client():
-    """The object-store client: Cloudflare R2 when configured, else AWS S3/moto.
+    """The object-store client: Cloudflare KV / R2 when configured, else S3/moto.
 
     Handlers must use this (not ``get_client("s3")``) so the object store can be
-    redirected to R2 purely by configuration.
+    redirected to a Cloudflare backend purely by configuration.
     """
+    if settings.kv_configured:
+        return _kv_client()
     if settings.r2_configured:
         return _r2_client()
     return get_client("s3")
 
 
+class _KVBody:
+    """Minimal file-like wrapper so boto3-style ``resp["Body"].read()`` works."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+    def __bytes__(self) -> bytes:
+        return self._data
+
+
+class _KVClient:
+    """boto3-S3-shaped shim backed by the Cloudflare Workers KV REST API.
+
+    Workers KV is not S3-compatible, so this exposes just the three operations
+    the codebase issues (``put_object`` / ``get_object`` / ``delete_object``)
+    against a single namespace. The ``Bucket`` argument is ignored — the vault
+    uses one namespace per environment — and SSE/content-type metadata are not
+    applicable (payloads are already AES-256-GCM ciphertext).
+    """
+
+    def __init__(self, base: str, account_id: str, namespace_id: str, token: str):
+        self._values_url = (
+            f"{base}/accounts/{account_id}/storage/kv/namespaces/{namespace_id}/values"
+        )
+        self._headers = {"Authorization": f"Bearer {token}"}
+        self._timeout = httpx.Timeout(30.0, connect=10.0, read=60.0)
+
+    def _url(self, key: str) -> str:
+        return f"{self._values_url}/{quote(key, safe='')}"
+
+    def put_object(self, Bucket=None, Key=None, Body=None, **kwargs) -> dict:  # noqa: N803
+        body = Body if isinstance(Body, (bytes, bytearray)) else bytes(Body or b"")
+        resp = httpx.put(self._url(Key), content=body, headers=self._headers, timeout=self._timeout)
+        resp.raise_for_status()
+        return {}
+
+    def get_object(self, Bucket=None, Key=None, **kwargs) -> dict:  # noqa: N803
+        resp = httpx.get(self._url(Key), headers=self._headers, timeout=self._timeout)
+        if resp.status_code == 404:
+            raise KeyError(Key)
+        resp.raise_for_status()
+        return {"Body": _KVBody(resp.content), "ContentLength": len(resp.content)}
+
+    def delete_object(self, Bucket=None, Key=None, **kwargs) -> dict:  # noqa: N803
+        resp = httpx.delete(self._url(Key), headers=self._headers, timeout=self._timeout)
+        if resp.status_code != 404:
+            resp.raise_for_status()
+        return {}
+
+
+def _kv_client() -> "_KVClient":
+    with _lock:
+        if "kv" not in _clients:
+            _clients["kv"] = _KVClient(
+                settings.cf_api_base,
+                settings.cf_account_id,
+                settings.kv_namespace_id,
+                settings.cf_api_token,
+            )
+        return _clients["kv"]
+
+
 def object_store_sse(key_id: str) -> dict:
     """SSE parameters for ``put_object``.
 
-    AWS S3 encrypts each object with the KMS CMK. Cloudflare R2 manages
+    AWS S3 encrypts each object with the KMS CMK. A Cloudflare backend manages
     encryption itself and rejects the ``aws:kms`` header, so return nothing
     there (payloads are already AES-256-GCM ciphertext regardless).
     """
-    if settings.r2_configured:
+    if settings.cloud_object_store:
         return {}
     return {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": key_id}
 
@@ -246,7 +329,13 @@ def ensure_resources() -> None:
                 print(f"[obsidian] PITR not enabled for {spec['table']}: {type(exc).__name__}")
 
         s3 = get_client("s3")
-        if settings.r2_configured:
+        if settings.kv_configured:
+            # The Workers KV namespace is provisioned via the Cloudflare
+            # dashboard or API and must already exist. Print (never raise) so a
+            # missing namespace surfaces at first use, not at startup.
+            print(f"[obsidian] object store: Cloudflare Workers KV namespace "
+                  f"{settings.kv_namespace_id!r} (account {settings.cf_account_id})")
+        elif settings.r2_configured:
             # The R2 bucket is provisioned in the Cloudflare dashboard and must
             # already exist; R2 also has no bucket-policy / public-access-block
             # API. Access is governed entirely by the R2 API token. Print (never

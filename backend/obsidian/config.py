@@ -41,9 +41,15 @@ class Settings:
     kms_key_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_KMS_KEY_ID", ""))
 
     # Object storage backend. "s3" (default) uses AWS S3 — or moto in-process
-    # when OBSIDIAN_LOCAL_AWS is set. "r2" stores ciphertext in Cloudflare R2
-    # (S3-compatible) instead. R2 replaces only the *object store*; document
-    # metadata still lives in DynamoDB and the DEK is still wrapped by KMS.
+    # when OBSIDIAN_LOCAL_AWS is set. Two Cloudflare backends are supported and
+    # replace only the *object store*; document metadata still lives in DynamoDB
+    # and the DEK is still wrapped by KMS:
+    #   "r2" — Cloudflare R2 (S3-compatible; requires a payment method to
+    #          enable even on the free tier).
+    #   "kv" — Cloudflare Workers KV (S3 is not spoken; accessed over the
+    #          Workers KV REST API, so it works on the cardless Workers Free
+    #          plan). Values are capped at 25 MiB and reads are eventually
+    #          consistent, so this suits small vaults.
     # Locally, moto keeps emulating DynamoDB/KMS while R2 requests pass through
     # to Cloudflare (aws._ensure_mock configures the passthrough).
     storage_backend: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_STORAGE_BACKEND", "s3").strip().lower())
@@ -51,6 +57,12 @@ class Settings:
     r2_access_key_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_ACCESS_KEY_ID", ""))
     r2_secret_access_key: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_SECRET_ACCESS_KEY", ""))
     r2_region: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_REGION", "auto"))
+
+    # Cloudflare Workers KV object store (storage_backend="kv").
+    cf_api_base: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_CF_API_BASE", "https://api.cloudflare.com/client/v4").rstrip("/"))
+    cf_account_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_CF_ACCOUNT_ID", ""))
+    cf_api_token: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_CF_API_TOKEN", ""))
+    kv_namespace_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_KV_NAMESPACE_ID", ""))
 
     # App
     public_base_url: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_PUBLIC_BASE_URL", "http://localhost:5173"))
@@ -193,6 +205,21 @@ class Settings:
             and bool(self.r2_access_key_id)
             and bool(self.r2_secret_access_key)
         )
+
+    @property
+    def kv_configured(self) -> bool:
+        """True when the object store is Cloudflare Workers KV and credentialed."""
+        return (
+            self.storage_backend in ("kv", "workers-kv", "workers_kv")
+            and bool(self.cf_account_id)
+            and bool(self.cf_api_token)
+            and bool(self.kv_namespace_id)
+        )
+
+    @property
+    def cloud_object_store(self) -> bool:
+        """True when objects live in a Cloudflare store (R2 or Workers KV)."""
+        return self.r2_configured or self.kv_configured
 
     @property
     def llm_configured(self) -> bool:

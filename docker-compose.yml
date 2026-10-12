@@ -10,6 +10,9 @@
 #                                             -> real OTP email delivery
 #   OBSIDIAN_STORAGE_BACKEND=r2 + OBSIDIAN_R2_* + OBSIDIAN_DOCUMENT_BUCKET
 #                                             -> store documents in Cloudflare R2
+#   OBSIDIAN_STORAGE_BACKEND=kv + OBSIDIAN_CF_ACCOUNT_ID +
+#   OBSIDIAN_CF_API_TOKEN + OBSIDIAN_KV_NAMESPACE_ID
+#                                             -> store documents in Workers KV
 services:
   obsidian:
     build: .
@@ -35,5 +38,8 @@ services:
       OBSIDIAN_R2_ACCESS_KEY_ID: ${OBSIDIAN_R2_ACCESS_KEY_ID:-}
       OBSIDIAN_R2_SECRET_ACCESS_KEY: ${OBSIDIAN_R2_SECRET_ACCESS_KEY:-}
       OBSIDIAN_R2_REGION: ${OBSIDIAN_R2_REGION:-auto}
+      OBSIDIAN_CF_ACCOUNT_ID: ${OBSIDIAN_CF_ACCOUNT_ID:-}
+      OBSIDIAN_CF_API_TOKEN: ${OBSIDIAN_CF_API_TOKEN:-}
+      OBSIDIAN_KV_NAMESPACE_ID: ${OBSIDIAN_KV_NAMESPACE_ID:-}
       OBSIDIAN_DEV_MODE: ${OBSIDIAN_DEV_MODE:-true}
     restart: unless-stopped

@@ -34,6 +34,7 @@ def _routes():
         from .functions import documents as _documents  # noqa
         from .functions import sharing as _sharing      # noqa
         from .functions import connections as _connections  # noqa
+        from .functions import groups as _groups        # noqa
         from .functions import activity as _activity    # noqa
         from .functions import admin as _admin          # noqa
         from .functions import intelligence as _intel   # noqa

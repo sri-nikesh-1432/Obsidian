@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
 
 from .. import audit, aws
+from ..config import settings
 from ..context import RequestContext
 from ..errors import invalid_input, not_found
 from ..router import route
@@ -17,14 +18,26 @@ from ..router import route
 ADMIN = ("admin",)
 
 
+def _storage_backend_label() -> str:
+    if settings.kv_configured:
+        return "cloudflare-workers-kv"
+    if settings.r2_configured:
+        return "cloudflare-r2"
+    return "s3"
+
+
 @route("GET", "/admin/analytics", roles=ADMIN)
 def analytics(req: RequestContext) -> dict:
     users = _scan("users", 2000)
     documents = _scan("documents", 5000)
     shares = _scan("shares", 5000)
+    group_items = _scan("groups", 5000)
 
     active_docs = [d for d in documents if not d.get("deleted_at")]
     now = datetime.now(timezone.utc).isoformat()
+    group_metas = [g for g in group_items if g.get("sk") == "META"]
+    group_members = [g for g in group_items if str(g.get("sk", "")).startswith("MEMBER#")]
+    group_messages = [g for g in group_items if str(g.get("sk", "")).startswith("MSG#")]
 
     by_role: dict[str, int] = {}
     ai_enabled = 0
@@ -62,10 +75,15 @@ def analytics(req: RequestContext) -> dict:
             "total": len(shares),
             **share_status,
         },
+        "groups": {
+            "total": len(group_metas),
+            "memberships": len(group_members),
+            "messages": len(group_messages),
+        },
         "security": _security_counts(),
         "health": {
             "status": "operational",
-            "storage_backend": "s3+kms",
+            "storage_backend": _storage_backend_label(),
             "metadata_backend": "dynamodb",
             "encryption": "AES-256-GCM (envelope, KMS)",
             "checked_at": now,

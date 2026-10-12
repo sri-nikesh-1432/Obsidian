@@ -180,6 +180,43 @@ export interface AdminAnalytics {
   users: { total: number; by_role: Record<string, number>; mfa_enabled: number; ai_enabled: number }
   documents: { total: number; storage_bytes: number; public: number; private: number; profile_visible: number }
   shares: { total: number; active: number; expired: number; revoked: number }
+  groups?: { total: number; memberships: number; messages: number }
   security: Record<string, number>
   health: Record<string, string>
+}
+
+export interface GroupSummary {
+  group_id: string
+  name: string
+  description: string
+  owner_id: string
+  owner_name: string
+  member_count: number
+  created_at: string
+  updated_at: string
+  role: 'owner' | 'member'
+}
+
+export interface GroupMember {
+  user_id: string
+  student_id: string
+  full_name: string
+  institution: string
+  avatar_seed: string
+  joined_at: string
+}
+
+export interface GroupMessage {
+  message_id: string
+  sender_id: string
+  sender_name: string
+  sender_role: string
+  body: string
+  created_at: string
+}
+
+export interface GroupDetail {
+  group: GroupSummary
+  members: GroupMember[]
+  messages: GroupMessage[]
 }

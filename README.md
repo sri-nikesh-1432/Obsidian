@@ -1,15 +1,29 @@
 # OBSIDIAN
 
 A secure student document vault. Students upload, encrypt, and share
-documents; faculty verify students; recruiters view consented profiles;
-admins see analytics and audit trails. A personal, consent-gated AI assistant
-(**OBSIDIAN Intelligence**) answers questions grounded in a user's own
-documents and profile.
+documents; faculty verify students and run **groups** (a cohort or class they
+can message all at once — a built-in group chat); recruiters view consented
+profiles; admins see analytics and audit trails. A personal, consent-gated AI
+assistant (**OBSIDIAN Intelligence**) answers questions grounded in a user's
+own documents and profile.
 
 - **Backend** — Python "Lambda" handlers (`backend/obsidian/`) that run
   unchanged on AWS API Gateway + Lambda. Locally, AWS (DynamoDB, S3, KMS) is
   emulated **in-process by moto**, so no AWS account or Docker is needed.
 - **Frontend** — Vite + React + TypeScript + Tailwind.
+
+### Encryption, storage & access at a glance
+
+| Concern | What OBSIDIAN uses |
+| ------- | ------------------ |
+| Document encryption | **AES-256-GCM** (authenticated) with a fresh 256-bit key per upload |
+| Key management | **AWS KMS envelope encryption** — a CMK wraps each per-document DEK; keys never leave the backend |
+| Object storage | Pluggable: **AWS S3** (default), **Cloudflare R2**, or **Cloudflare Workers KV** — see *Storage* below |
+| Metadata | **DynamoDB** (encrypted at rest, point-in-time recovery) |
+| Access control | Server-side sessions + per-route **RBAC** (`student` / `faculty` / `recruiter` / `admin`); authorization is enforced on the server, never trusted from the client |
+| Secrets | Secrets are **backend-only**; the browser receives only a publishable payment key id. No secret is ever bundled into the frontend |
+
+See [Security & encryption](#security--encryption) below for the full model.
 
 ---
 
@@ -157,6 +171,56 @@ python tests/e2e_smoke.py http://localhost:5173   # 27 checks
 
 ---
 
+## Security & encryption
+
+- **Authenticated encryption per document.** Every upload generates a fresh
+  256-bit data encryption key; the file is encrypted with **AES-256-GCM**, so
+  tampering is detected on read. Only ciphertext ever reaches the object store.
+- **Envelope key management.** The per-document DEK is wrapped by an **AWS KMS**
+  customer master key (automatic rotation). Keys never leave the backend, never
+  appear in API responses, never enter vector storage, and never touch a model
+  prompt. Key versions are retained for rotation.
+- **Encrypted at rest and in transit.** DynamoDB tables use SSE-KMS with
+  point-in-time recovery; the S3 bucket is private (all public access blocked),
+  TLS-only, versioned, and SSE-KMS encrypted. Cloudflare R2 / Workers KV manage
+  their own at-rest encryption (payloads are already ciphertext).
+- **Server-side authorization.** Sessions are server-side and revocable; role
+  checks run on the server for every route (`student` / `faculty` / `recruiter`
+  / `admin`), and the client can never widen its own permissions. Mutations are
+  origin-checked (CSRF defence) and rate-limited.
+- **Audit trail.** Sign-ins, MFA, uploads, downloads, shares, lookups, group
+  actions and security events are recorded with request correlation IDs.
+  Passwords, OTPs, keys, and raw share tokens are never written to logs.
+- **Secrets stay server-side.** Provider secrets (KMS, Cloudflare, Razorpay,
+  SMTP, Google OAuth) live only in backend environment variables. The frontend
+  ships **no secrets** — the browser receives only the Razorpay *publishable*
+  key id, and all sensitive calls go through the same-origin API.
+
+## Groups & group chat (faculty)
+
+A `faculty` account is a *teacher*. Teachers create groups, add students by
+their opaque student code, and post messages every member sees — a lightweight
+classroom feed.
+
+| Endpoint | Who | Purpose |
+| -------- | --- | ------- |
+| `POST /groups` | faculty | Create a group (name + optional description) |
+| `GET /groups` | faculty & student | List groups (teachers: the ones they own; students: the ones they belong to) |
+| `GET /groups/{id}` | owner & members | Group details, roster, and recent messages |
+| `PATCH /groups/{id}` | owner | Rename / edit the description |
+| `DELETE /groups/{id}` | owner | Delete the group, roster, and messages |
+| `POST /groups/{id}/members` | owner | Add a student by their `OBS-…` code |
+| `DELETE /groups/{id}/members/{student_id}` | owner | Remove a student |
+| `POST /groups/{id}/messages` | owner & members | Post a message to the group chat |
+| `GET /groups/{id}/messages` | owner & members | Read the group chat |
+
+Access is denied with a generic `404` to anyone who is neither the owner nor a
+member, so group existence is never leaked. Only the owner can manage the
+roster; any member (the teacher included) can post. Every group action is
+audited. Groups live in their own DynamoDB table (`obsidian-groups`) keyed so
+that a teacher's groups, a student's memberships, and each group's message
+timeline are all single-query reads.
+
 ## Storage & payments (students)
 
 Every student account starts with **5 GB free**. Uploading is refused with
@@ -223,6 +287,32 @@ Because R2 has no create-bucket or bucket-policy API, create the bucket first
 and scope the token to it. Locally, moto keeps emulating DynamoDB/KMS while R2
 requests pass through to Cloudflare.
 
+> **Note:** R2 requires a payment method to activate, even on the free tier
+> (10 GB-month). If you need a cardless option, use Workers KV below.
+
+### Cloudflare Workers KV object storage (optional, cardless)
+
+Workers KV is available on the Workers **Free** plan without a payment method,
+so it is the alternative when R2 cannot be enabled. It is **not S3-compatible**;
+the app talks to the KV REST API through a small boto3-shaped shim, so the
+document code is unchanged. Only the object store is replaced — metadata stays
+in DynamoDB and DEKs stay KMS-wrapped.
+
+| Variable | Example | Notes |
+| -------- | ------- | ----- |
+| `OBSIDIAN_STORAGE_BACKEND` | `kv` | `kv` selects Workers KV |
+| `OBSIDIAN_CF_ACCOUNT_ID` | `eb221…225` | Cloudflare account id |
+| `OBSIDIAN_CF_API_TOKEN` | *(secret)* | Token with **Workers KV Storage: Edit** |
+| `OBSIDIAN_KV_NAMESPACE_ID` | *(id)* | Existing KV namespace id |
+| `OBSIDIAN_CF_API_BASE` | `https://api.cloudflare.com/client/v4` | Override for tests |
+
+Create the namespace in **Workers & Pages → KV** (or `POST /accounts/{id}/storage/kv/namespaces`
+with `{"title": "obsidian-documents"}`), then create an account API token that
+grants **Workers KV Storage: Edit**. Free-tier limits: 1 GB storage, 25 MiB per
+value, 1,000 writes/day, 100k reads/day, and reads are **eventually consistent**
+(a just-uploaded file may 404 for up to ~60s). Suitable for small vaults; R2 is
+preferred when a payment method is available.
+
 ---
 
 
@@ -252,7 +342,7 @@ boundary. The same handlers in `backend/obsidian/` run unchanged on Lambda
 | ----- | -------- | ------- |
 | **Lambda** | `GatewayFunction` — `obsidian.gateway.dispatch` | One function serves every `/api/v1` route; X-Ray tracing on. |
 | **API Gateway** | `HttpApi` (HTTP API v2, stage `v1`) | Routes `/` and `/{proxy+}` to the Lambda; 100 burst / 50 rps throttle; JSON access logs. |
-| **DynamoDB** | 12 tables — `obsidian-users`, `-profiles`, `-sessions`, `-mfa`, `-documents`, `-shares`, `-audit`, `-rag`, `-config`, `-ratelimits`, `-devmail`, `-billing` | Pay-per-request, SSE-KMS, PITR; `ratelimits` has TTL. |
+| **DynamoDB** | 14 tables — `obsidian-users`, `-profiles`, `-sessions`, `-mfa`, `-documents`, `-shares`, `-connections`, `-groups`, `-audit`, `-rag`, `-config`, `-ratelimits`, `-devmail`, `-billing` | Pay-per-request, SSE-KMS, PITR; `ratelimits` has TTL. |
 | **S3** | `DocumentBucket` | Private (all public access blocked), SSE-KMS with the CMK, versioned, STANDARD_IA at 30 days, TLS-only bucket policy. Holds ciphertext only. |
 | **KMS** | `KmsKey` | CMK with automatic rotation; wraps per-document data keys. Key policy delegates to the account root to avoid a CFN dependency cycle. |
 | **Secrets Manager** | `SecretsManagerSecret` | JSON credentials (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `RESEND_API_KEY`, `OBSIDIAN_SMTP_PASSWORD`, `LLM_API_KEY`), loaded at cold start via `OBSIDIAN_SECRET_NAME`. |
@@ -332,8 +422,9 @@ Delivery order is Resend → SMTP → local dev mailbox.
 | `OBSIDIAN_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | CORS allow-list |
 | `OBSIDIAN_COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `OBSIDIAN_STATIC_DIR` | *(empty)* | Serve the built SPA from the API process (single-container deploy) |
-| `OBSIDIAN_STORAGE_BACKEND` | `s3` | `s3` (AWS S3 / moto) or `r2` (Cloudflare R2 — see above) |
+| `OBSIDIAN_STORAGE_BACKEND` | `s3` | `s3` (AWS S3 / moto), `r2` (Cloudflare R2), or `kv` (Cloudflare Workers KV — see above) |
 | `OBSIDIAN_R2_ENDPOINT` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_REGION` | *(empty)* / `auto` | Cloudflare R2 S3 credentials and endpoint |
+| `OBSIDIAN_CF_ACCOUNT_ID` / `OBSIDIAN_CF_API_TOKEN` / `OBSIDIAN_KV_NAMESPACE_ID` | *(empty)* | Cloudflare Workers KV object store (cardless) |
 | `OBSIDIAN_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` | *(empty)* / `587` | SMTP delivery for real OTP email |
 | `RAZORPAY_KEY_ID` / `_KEY_SECRET` / `_WEBHOOK_SECRET` | *(empty)* | Storage payments. Unset ⇒ simulated checkout in dev mode only |
 | `LLM_PROVIDER` | `ollama` | `ollama` or any OpenAI-compatible provider |
@@ -379,7 +470,7 @@ backend/
     router.py        route table and {param} matching
     profile_schema.py role profile fields (single source of truth)
     rag.py           ingestion, per-user retrieval, conversational answers
-    functions/       auth, documents, sharing, profile, intelligence, admin, billing ...
+    functions/       auth, documents, sharing, connections, groups, profile, intelligence, admin, billing ...
     plans.py         student storage plan ladder (5 GB free, +10 GB tiers)
     aws.py           moto bootstrap + cached boto3 clients
   local/
@@ -387,6 +478,7 @@ backend/
     seed.py          demo data seeder (drives the real API)
   tests/             pytest suite
 frontend/
+  src/pages/Groups.tsx           faculty groups + group chat (shared by teacher & student)
   src/components/StorageMeter.tsx  quota meter (sidebar + vault)
   src/pages/student/Billing.tsx    plans + Razorpay Checkout + history
   src/lib/razorpay.ts      Checkout helper

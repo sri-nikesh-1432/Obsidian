@@ -22,6 +22,9 @@ EVENT_TYPES = {
     # connections (student social graph)
     "connection_requested", "connection_accepted", "connection_declined",
     "connection_removed",
+    # groups (faculty-led cohorts + group chat)
+    "group_created", "group_updated", "group_deleted", "group_viewed",
+    "group_member_added", "group_member_removed", "group_message_sent",
     # profile
     "profile_updated", "visibility_changed",
     # AI

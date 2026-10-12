@@ -29,6 +29,7 @@ import Billing from './pages/student/Billing'
 import RoleHome from './pages/role/Home'
 import FindStudent from './pages/role/FindStudent'
 import Admin from './pages/role/Admin'
+import Groups from './pages/Groups'
 import SharedLink from './pages/SharedLink'
 import NotFound from './pages/NotFound'
 
@@ -125,6 +126,14 @@ export default function App() {
         <Route path="security" element={<SecurityCenter />} />
         <Route path="intelligence" element={<Intelligence />} />
         <Route path="storage" element={<Billing />} />
+        <Route
+          path="groups"
+          element={
+            <RequireRole roles={['student', 'faculty']}>
+              <Groups />
+            </RequireRole>
+          }
+        />
         <Route
           path="home"
           element={

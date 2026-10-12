@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Activity, BarChart3, Database, FileStack, Link2, Server, ShieldAlert, Users,
+  Activity, BarChart3, Database, FileStack, Link2, MessageSquare, Server, ShieldAlert, Users,
 } from 'lucide-react'
 import { api } from '../../lib/api'
 import type { AdminAnalytics } from '../../lib/types'
@@ -136,6 +136,8 @@ export default function Admin() {
               hint="ciphertext at rest" />
             <StatCard label="Share links" value={analytics.shares.total} icon={<Link2 size={15} />}
               hint={`${analytics.shares.active} active · ${analytics.shares.expired} expired · ${analytics.shares.revoked} revoked`} />
+            <StatCard label="Groups" value={analytics.groups?.total ?? 0} icon={<MessageSquare size={15} />}
+              hint={`${analytics.groups?.memberships ?? 0} members · ${analytics.groups?.messages ?? 0} messages`} />
           </div>
 
           <div className="grid lg:grid-cols-2 gap-4">

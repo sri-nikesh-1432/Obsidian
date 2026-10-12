@@ -13,6 +13,8 @@ USER_SAFE_EVENTS = {
     "share_access_denied", "profile_updated", "visibility_changed",
     "ai_enabled", "ai_disabled", "ai_query", "registration_completed",
     "student_lookup", "rate_limit_triggered", "authorization_denied",
+    "group_created", "group_updated", "group_deleted", "group_viewed",
+    "group_member_added", "group_member_removed", "group_message_sent",
 }
 
 SECURITY_FOR_USER = {
