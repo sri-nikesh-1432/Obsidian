@@ -131,12 +131,29 @@ def create_share(req: RequestContext) -> dict:
         share["token_hash"] = token_hash
     else:
         grantee_email = str(body.get("grantee_email", "")).strip().lower()
-        if not grantee_email:
-            raise invalid_input("Enter the recipient's email address.")
-        from .auth import find_user_by_email
-        grantee = find_user_by_email(grantee_email)
-        if not grantee or grantee["user_id"] == user["user_id"] or grantee.get("status") != "active":
-            raise ApiError("INVALID_INPUT", "We couldn't find an active OBSIDIAN account for that recipient.", 404)
+        grantee_student_id = str(body.get("grantee_student_id", "")).strip().upper()
+        if grantee_student_id:
+            # Share directly to a connected student by their code.
+            presp = aws.table("profiles").query(
+                IndexName="gsi1",
+                KeyConditionExpression=Key("gsi1pk").eq(f"SID#{grantee_student_id}"),
+                Limit=1,
+            )
+            items = presp.get("Items", [])
+            grantee = None
+            if items and items[0].get("user_id"):
+                grantee = aws.table("users").get_item(
+                    Key={"pk": f"USER#{items[0]['user_id']}", "sk": "META"}
+                ).get("Item")
+            if not grantee or grantee["user_id"] == user["user_id"] or grantee.get("status") != "active":
+                raise ApiError("INVALID_INPUT", "We couldn't find an active OBSIDIAN account for that student.", 404)
+        elif grantee_email:
+            from .auth import find_user_by_email
+            grantee = find_user_by_email(grantee_email)
+            if not grantee or grantee["user_id"] == user["user_id"] or grantee.get("status") != "active":
+                raise ApiError("INVALID_INPUT", "We couldn't find an active OBSIDIAN account for that recipient.", 404)
+        else:
+            raise invalid_input("Enter the recipient's email address or student code.")
         share["grantee_id"] = grantee["user_id"]
         share["grantee_email"] = grantee["email"]
         share["gsi3pk"] = f"GRANTEE#{grantee['user_id']}"
@@ -427,14 +444,13 @@ def share_edit(req: RequestContext) -> dict:
         raise invalid_input("Content exceeds the size limit.")
 
     encrypted = crypto.encrypt_bytes(content, doc["document_id"])
-    s3 = aws.get_client("s3")
+    s3 = aws.storage_client()
     s3.put_object(
         Bucket=aws.settings.document_bucket,
         Key=doc["storage_key"],
         Body=encrypted.ciphertext,
         ContentType="application/octet-stream",
-        ServerSideEncryption="aws:kms",
-        SSEKMSKeyId=encrypted.key_id,
+        **aws.object_store_sse(encrypted.key_id),
     )
     now = _now()
     aws.table("documents").update_item(

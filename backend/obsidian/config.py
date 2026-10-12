@@ -40,6 +40,18 @@ class Settings:
     document_bucket: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_DOCUMENT_BUCKET", "obsidian-documents-local"))
     kms_key_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_KMS_KEY_ID", ""))
 
+    # Object storage backend. "s3" (default) uses AWS S3 — or moto in-process
+    # when OBSIDIAN_LOCAL_AWS is set. "r2" stores ciphertext in Cloudflare R2
+    # (S3-compatible) instead. R2 replaces only the *object store*; document
+    # metadata still lives in DynamoDB and the DEK is still wrapped by KMS.
+    # Locally, moto keeps emulating DynamoDB/KMS while R2 requests pass through
+    # to Cloudflare (aws._ensure_mock configures the passthrough).
+    storage_backend: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_STORAGE_BACKEND", "s3").strip().lower())
+    r2_endpoint: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_ENDPOINT", "").strip())
+    r2_access_key_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_ACCESS_KEY_ID", ""))
+    r2_secret_access_key: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_SECRET_ACCESS_KEY", ""))
+    r2_region: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_R2_REGION", "auto"))
+
     # App
     public_base_url: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_PUBLIC_BASE_URL", "http://localhost:5173"))
     api_base_url: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_API_BASE_URL", "http://localhost:8080"))
@@ -171,6 +183,16 @@ class Settings:
     @is_prod.setter
     def is_prod(self, value: bool) -> None:
         self._is_prod_override = value
+
+    @property
+    def r2_configured(self) -> bool:
+        """True when the object store is Cloudflare R2 and fully credentialed."""
+        return (
+            self.storage_backend == "r2"
+            and bool(self.r2_endpoint)
+            and bool(self.r2_access_key_id)
+            and bool(self.r2_secret_access_key)
+        )
 
     @property
     def llm_configured(self) -> bool:

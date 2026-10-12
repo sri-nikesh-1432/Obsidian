@@ -25,6 +25,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+pytest_*.txt
 
 # Local Netlify folder
 .netlify

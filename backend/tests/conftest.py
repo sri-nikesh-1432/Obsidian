@@ -53,11 +53,21 @@ class Client:
             payload = raw
         elif body is not None:
             payload = json.dumps(body).encode()
+        # split any query string off the path (real clients send it separately)
+        query: dict = {}
+        if "?" in path:
+            path, _, qs = path.partition("?")
+            for pair in qs.split("&"):
+                if not pair:
+                    continue
+                k, _, v = pair.partition("=")
+                from urllib.parse import unquote
+                query[unquote(k)] = unquote(v)
         event = {
             "version": "2.0",
             "rawPath": path,
             "headers": hdrs,
-            "queryStringParameters": None,
+            "queryStringParameters": query or None,
             "requestContext": {"requestId": uuid.uuid4().hex,
                                "http": {"method": method, "path": path, "sourceIp": ip}},
             "body": base64.b64encode(payload).decode() if payload else "",

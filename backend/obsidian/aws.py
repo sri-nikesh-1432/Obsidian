@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Key, Attr  # noqa: F401  (re-exported for handlers)
+from botocore.config import Config
 
 from .config import settings
 
@@ -55,6 +56,14 @@ TABLES: dict[str, dict] = {
             {"name": "gsi3", "hash": "gsi3pk", "range": "gsi3sk"},
         ],
     },
+    # Student connection graph: one directed edge per (follower -> followee).
+    # gsi1 indexes edges by target so incoming requests / followers can be
+    # listed without a scan.
+    "connections": {
+        "table": f"{P}-connections",
+        "key": ("pk", "sk"),
+        "gsis": [{"name": "gsi1", "hash": "gsi1pk", "range": "gsi1sk"}],
+    },
     "audit": {
         "table": f"{P}-audit",
         "key": ("pk", "sk"),
@@ -85,7 +94,15 @@ def _ensure_mock() -> None:
     with _lock:
         if _mock is None:
             from moto import mock_aws
-            _mock = mock_aws()
+            config = None
+            if settings.r2_configured:
+                # Let the R2 endpoint escape moto's process-wide interception
+                # while DynamoDB/KMS stay emulated in-process. Without this the
+                # S3 object calls would be answered by moto instead of Cloudflare.
+                import re
+                endpoint = settings.r2_endpoint.rstrip("/")
+                config = {"core": {"passthrough": {"urls": [re.escape(endpoint)], "services": []}}}
+            _mock = mock_aws(config=config) if config else mock_aws()
             _mock.start()
 
 
@@ -104,6 +121,53 @@ def get_resource(service: str):
         if service not in _resources:
             _resources[service] = _session().resource(service)
         return _resources[service]
+
+
+def _r2_client():
+    """A boto3 S3 client pointed at Cloudflare R2 (S3-compatible API).
+
+    R2 speaks the S3 protocol, so every object operation in the codebase works
+    unchanged — only the endpoint and credentials differ. Path-style addressing
+    is required because R2 buckets are not DNS-virtual-hosted per account.
+    """
+    with _lock:
+        if "r2" not in _clients:
+            _clients["r2"] = boto3.session.Session().client(
+                "s3",
+                endpoint_url=settings.r2_endpoint,
+                aws_access_key_id=settings.r2_access_key_id,
+                aws_secret_access_key=settings.r2_secret_access_key,
+                region_name=settings.r2_region or "auto",
+                config=Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "path"},
+                    retries={"max_attempts": 3, "mode": "standard"},
+                ),
+            )
+        return _clients["r2"]
+
+
+def storage_client():
+    """The object-store client: Cloudflare R2 when configured, else AWS S3/moto.
+
+    Handlers must use this (not ``get_client("s3")``) so the object store can be
+    redirected to R2 purely by configuration.
+    """
+    if settings.r2_configured:
+        return _r2_client()
+    return get_client("s3")
+
+
+def object_store_sse(key_id: str) -> dict:
+    """SSE parameters for ``put_object``.
+
+    AWS S3 encrypts each object with the KMS CMK. Cloudflare R2 manages
+    encryption itself and rejects the ``aws:kms`` header, so return nothing
+    there (payloads are already AES-256-GCM ciphertext regardless).
+    """
+    if settings.r2_configured:
+        return {}
+    return {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": key_id}
 
 
 def table(name: str):
@@ -182,45 +246,53 @@ def ensure_resources() -> None:
                 print(f"[obsidian] PITR not enabled for {spec['table']}: {type(exc).__name__}")
 
         s3 = get_client("s3")
-        buckets = {b["Name"] for b in s3.list_buckets().get("Buckets", [])}
-        if settings.document_bucket not in buckets:
-            if settings.aws_region == "us-east-1":
-                s3.create_bucket(Bucket=settings.document_bucket)
-            else:
-                s3.create_bucket(
-                    Bucket=settings.document_bucket,
-                    CreateBucketConfiguration={"LocationConstraint": settings.aws_region},
-                )
-            try:
-                # Block all public access at the account/bucket level.
-                s3.put_public_access_block(
-                    Bucket=settings.document_bucket,
-                    PublicAccessBlockConfiguration={
-                        "BlockPublicAcls": True,
-                        "IgnorePublicAcls": True,
-                        "BlockPublicPolicy": True,
-                        "RestrictPublicBuckets": True,
-                    },
-                )
-            except Exception as exc:
-                print(f"[obsidian] public access block not applied: {type(exc).__name__}")
-            try:
-                s3.put_bucket_policy(
-                    Bucket=settings.document_bucket,
-                    policy=(
-                        '{"Version":"2012-10-17","Statement":['
-                        '{"Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*",'
-                        '"Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],'
-                        '"Condition":{"Bool":{"aws:SecureTransport":"false"}}},'
-                        '{"Sid":"EnforceTLSVersion","Effect":"Deny","Principal":"*",'
-                        '"Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],'
-                        '"Condition":{"NumericLessThan":{"s3:TlsVersion":"1.2"}}}]}'
-                        % (settings.document_bucket, settings.document_bucket,
-                           settings.document_bucket, settings.document_bucket)
-                    ),
-                )
-            except Exception:
-                pass  # bucket policies are not supported by every emulator
+        if settings.r2_configured:
+            # The R2 bucket is provisioned in the Cloudflare dashboard and must
+            # already exist; R2 also has no bucket-policy / public-access-block
+            # API. Access is governed entirely by the R2 API token. Print (never
+            # raise) so a missing bucket surfaces at first use, not at startup.
+            print(f"[obsidian] object store: Cloudflare R2 bucket {settings.document_bucket!r} "
+                  f"at {settings.r2_endpoint}")
+        else:
+            buckets = {b["Name"] for b in s3.list_buckets().get("Buckets", [])}
+            if settings.document_bucket not in buckets:
+                if settings.aws_region == "us-east-1":
+                    s3.create_bucket(Bucket=settings.document_bucket)
+                else:
+                    s3.create_bucket(
+                        Bucket=settings.document_bucket,
+                        CreateBucketConfiguration={"LocationConstraint": settings.aws_region},
+                    )
+                try:
+                    # Block all public access at the account/bucket level.
+                    s3.put_public_access_block(
+                        Bucket=settings.document_bucket,
+                        PublicAccessBlockConfiguration={
+                            "BlockPublicAcls": True,
+                            "IgnorePublicAcls": True,
+                            "BlockPublicPolicy": True,
+                            "RestrictPublicBuckets": True,
+                        },
+                    )
+                except Exception as exc:
+                    print(f"[obsidian] public access block not applied: {type(exc).__name__}")
+                try:
+                    s3.put_bucket_policy(
+                        Bucket=settings.document_bucket,
+                        policy=(
+                            '{"Version":"2012-10-17","Statement":['
+                            '{"Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*",'
+                            '"Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],'
+                            '"Condition":{"Bool":{"aws:SecureTransport":"false"}}},'
+                            '{"Sid":"EnforceTLSVersion","Effect":"Deny","Principal":"*",'
+                            '"Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],'
+                            '"Condition":{"NumericLessThan":{"s3:TlsVersion":"1.2"}}}]}'
+                            % (settings.document_bucket, settings.document_bucket,
+                               settings.document_bucket, settings.document_bucket)
+                        ),
+                    )
+                except Exception:
+                    pass  # bucket policies are not supported by every emulator
 
         kms = get_client("kms")
         cfg = table("config")

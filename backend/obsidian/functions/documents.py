@@ -16,7 +16,7 @@ from ..context import RequestContext
 from ..errors import ApiError, access_denied, invalid_input, not_found
 from ..ids import uuid_hex
 from ..router import route
-from ..validation import validate_file, TEXT_EXTENSIONS, extension_of
+from ..validation import validate_file, sanitize_folder, TEXT_EXTENSIONS, extension_of
 from .billing import check_quota, storage_status
 
 VISIBILITIES = ("public", "private")
@@ -68,7 +68,7 @@ def active_grant(req: RequestContext, document_id: str) -> dict | None:
 def decrypt_document(doc: dict, request_id: str, *, action: str = "document_viewed") -> dict:
     """Fetch ciphertext from S3, verify integrity, decrypt. Fails closed."""
     try:
-        s3 = aws.get_client("s3")
+        s3 = aws.storage_client()
         obj = s3.get_object(Bucket=aws.settings.document_bucket, Key=doc["storage_key"])
         ciphertext = obj["Body"].read()
     except Exception:
@@ -111,6 +111,7 @@ def doc_view(doc: dict) -> dict:
     return {
         "document_id": doc["document_id"],
         "filename": doc["filename"],
+        "folder": doc.get("folder", ""),
         "mime_type": doc.get("mime_type", ""),
         "size_bytes": doc.get("size_bytes", 0),
         "visibility": doc.get("visibility", "private"),
@@ -133,19 +134,18 @@ def doc_view(doc: dict) -> dict:
 
 # ------------------------------------------------------------------- upload
 
-@route("POST", "/documents", roles=("student",), rate=("upload", 60, 60))
-def upload_document(req: RequestContext) -> dict:
-    user = req.require_auth()
-    body = req.body
-    filename = str(body.get("filename", ""))
-    content_b64 = str(body.get("content_base64", ""))
-    if not content_b64:
-        raise ApiError("UPLOAD_REJECTED", "No file content was provided.", 400)
-    try:
-        content = base64.b64decode(content_b64, validate=True)
-    except Exception:
-        raise ApiError("UPLOAD_REJECTED", "The file content could not be decoded.", 400)
-
+def _process_upload(
+    user: dict,
+    filename: str,
+    content: bytes,
+    *,
+    visibility: str,
+    profile_visible: bool,
+    rag_eligible: bool,
+    folder: str,
+    request_id: str,
+) -> dict:
+    """Validate, scan, encrypt and store one document. Returns the stored item."""
     filename, mime = validate_file(filename, content)
 
     # Storage entitlement (5 GB free, +10 GB per paid plan). Checked before
@@ -160,46 +160,43 @@ def upload_document(req: RequestContext) -> dict:
         audit.write_event(
             actor_id=user["user_id"], actor_role=user["role"],
             event_type="suspicious_activity", resource_type="document",
-            resource_id="upload", result="failure", request_id=req.request_id,
+            resource_id="upload", result="failure", request_id=request_id,
             metadata={"stage": "malware_scan"},
         )
         raise
 
-    visibility = str(body.get("visibility", "private")).lower()
     if visibility not in VISIBILITIES:
         raise invalid_input("Visibility must be public or private.")
-    profile_visible = bool(body.get("profile_visible", False))
-    rag_eligible = bool(body.get("rag_eligible", False))
     if profile_visible and visibility == "private":
         # Profile visibility is deliberate and cannot be implied by privacy.
         profile_visible = True  # allowed: a private-in-vault doc can still be profile-visible
 
+    folder = sanitize_folder(folder)
     document_id = uuid_hex()
     now = datetime.now(timezone.utc).isoformat()
     storage_key = f"documents/{document_id}/content"
 
     encrypted = crypto.encrypt_bytes(content, document_id)
 
-    s3 = aws.get_client("s3")
+    s3 = aws.storage_client()
     try:
         s3.put_object(
             Bucket=aws.settings.document_bucket,
             Key=storage_key,
             Body=encrypted.ciphertext,
             ContentType="application/octet-stream",
-            ServerSideEncryption="aws:kms",
-            SSEKMSKeyId=encrypted.key_id,
             Metadata={
                 "document-id": document_id,
                 "algorithm": crypto.ALGORITHM,
                 "ciphertext-sha256": encrypted.ciphertext_sha256,
             },
+            **aws.object_store_sse(encrypted.key_id),
         )
     except Exception:
         audit.write_event(
             actor_id=user["user_id"], actor_role=user["role"],
             event_type="suspicious_activity", resource_type="document",
-            resource_id=document_id, result="failure", request_id=req.request_id,
+            resource_id=document_id, result="failure", request_id=request_id,
             metadata={"stage": "storage_write"},
         )
         raise ApiError("STORAGE_ERROR", "The document could not be stored. Please try again.", 503)
@@ -216,6 +213,7 @@ def upload_document(req: RequestContext) -> dict:
         "document_id": document_id,
         "owner_id": user["user_id"],
         "filename": filename,
+        "folder": folder,
         "mime_type": mime,
         "size_bytes": len(content),
         "storage_key": storage_key,
@@ -243,8 +241,9 @@ def upload_document(req: RequestContext) -> dict:
     audit.write_event(
         actor_id=user["user_id"], actor_role=user["role"],
         event_type="document_uploaded", resource_type="document",
-        resource_id=document_id, request_id=req.request_id,
-        metadata={"filename": filename, "size_bytes": len(content), "visibility": visibility},
+        resource_id=document_id, request_id=request_id,
+        metadata={"filename": filename, "size_bytes": len(content),
+                  "visibility": visibility, "folder": folder},
     )
 
     if ai_enabled and rag_eligible:
@@ -260,7 +259,86 @@ def upload_document(req: RequestContext) -> dict:
         except Exception:
             item["rag_status"] = "failed"
 
+    return item
+
+
+def _decode_content(content_b64: str) -> bytes:
+    if not content_b64:
+        raise ApiError("UPLOAD_REJECTED", "No file content was provided.", 400)
+    try:
+        return base64.b64decode(content_b64, validate=True)
+    except Exception:
+        raise ApiError("UPLOAD_REJECTED", "The file content could not be decoded.", 400)
+
+
+def _upload_options(body: dict) -> tuple[str, bool, bool]:
+    visibility = str(body.get("visibility", "private")).lower()
+    if visibility not in VISIBILITIES:
+        raise invalid_input("Visibility must be public or private.")
+    return visibility, bool(body.get("profile_visible", False)), bool(body.get("rag_eligible", False))
+
+
+@route("POST", "/documents", roles=("student",), rate=("upload", 120, 60))
+def upload_document(req: RequestContext) -> dict:
+    user = req.require_auth()
+    body = req.body
+    content = _decode_content(str(body.get("content_base64", "")))
+    visibility, profile_visible, rag_eligible = _upload_options(body)
+    item = _process_upload(
+        user, str(body.get("filename", "")), content,
+        visibility=visibility, profile_visible=profile_visible,
+        rag_eligible=rag_eligible, folder=str(body.get("folder", "")),
+        request_id=req.request_id,
+    )
     return 201, {"document": doc_view(item)}
+
+
+@route("POST", "/documents/batch", roles=("student",), rate=("upload", 120, 60))
+def upload_batch(req: RequestContext) -> dict:
+    """Folder / multi-file upload. Each file is validated independently; a bad
+    file is reported without failing the whole batch."""
+    user = req.require_auth()
+    body = req.body
+    files = body.get("files")
+    if not isinstance(files, list) or not files:
+        raise invalid_input("Provide a list of files to upload.")
+    if len(files) > 200:
+        raise invalid_input("A single batch is limited to 200 files.")
+    default_visibility, default_profile_visible, default_rag = _upload_options(body)
+    default_folder = str(body.get("folder", ""))
+
+    uploaded: list[dict] = []
+    errors: list[dict] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            errors.append({"filename": "", "error": "invalid entry"})
+            continue
+        name = str(entry.get("filename", ""))
+        try:
+            content = _decode_content(str(entry.get("content_base64", "")))
+            visibility = str(entry.get("visibility", default_visibility)).lower()
+            if visibility not in VISIBILITIES:
+                visibility = default_visibility
+            item = _process_upload(
+                user, name, content,
+                visibility=visibility,
+                profile_visible=bool(entry.get("profile_visible", default_profile_visible)),
+                rag_eligible=bool(entry.get("rag_eligible", default_rag)),
+                folder=str(entry.get("folder", default_folder)),
+                request_id=req.request_id,
+            )
+            uploaded.append(doc_view(item))
+        except ApiError as exc:
+            errors.append({"filename": name, "error": exc.message})
+        except Exception:
+            errors.append({"filename": name, "error": "upload failed"})
+
+    return 201, {
+        "uploaded": uploaded,
+        "errors": errors,
+        "count": len(uploaded),
+        "failed": len(errors),
+    }
 
 
 # --------------------------------------------------------------------- read
@@ -269,6 +347,7 @@ def upload_document(req: RequestContext) -> dict:
 def list_documents(req: RequestContext) -> dict:
     user = req.require_auth()
     query = str(req.query.get("query", "")).strip().lower()
+    folder = str(req.query.get("folder", "")).strip()
     sort = str(req.query.get("sort", "newest"))
     try:
         limit = min(int(req.query.get("limit", 100)), 200)
@@ -282,9 +361,13 @@ def list_documents(req: RequestContext) -> dict:
         Limit=500,
     )
     docs = [d for d in resp.get("Items", []) if not d.get("deleted_at")]
+    folders = sorted({d.get("folder", "") for d in docs if d.get("folder")})
+    if folder:
+        docs = [d for d in docs if d.get("folder", "") == folder]
     if query:
         docs = [d for d in docs if query in d["filename"].lower()
-                or query in d.get("mime_type", "").lower()]
+                or query in d.get("mime_type", "").lower()
+                or query in d.get("folder", "").lower()]
     if sort == "name":
         docs.sort(key=lambda d: d["filename"].lower())
     elif sort == "oldest":
@@ -300,6 +383,7 @@ def list_documents(req: RequestContext) -> dict:
     total_bytes = sum(d.get("size_bytes", 0) for d in docs)
     return {
         "documents": views,
+        "folders": folders,
         "total": len(docs),
         "total_bytes": total_bytes,
         "storage": storage_status(user, used=total_bytes),
@@ -396,14 +480,13 @@ def replace_document_content(req: RequestContext) -> dict:
         check_quota(user, growth)
 
     encrypted = crypto.encrypt_bytes(content, doc["document_id"])
-    s3 = aws.get_client("s3")
+    s3 = aws.storage_client()
     s3.put_object(
         Bucket=aws.settings.document_bucket,
         Key=doc["storage_key"],
         Body=encrypted.ciphertext,
         ContentType="application/octet-stream",
-        ServerSideEncryption="aws:kms",
-        SSEKMSKeyId=encrypted.key_id,
+        **aws.object_store_sse(encrypted.key_id),
     )
     now = datetime.now(timezone.utc).isoformat()
     aws.table("documents").update_item(
@@ -458,6 +541,12 @@ def update_document(req: RequestContext) -> dict:
             updates["profile_visible"] = pv
             events.append(("visibility_changed", {"scope": "document", "profile_visible": pv}))
 
+    if "folder" in body:
+        new_folder = sanitize_folder(str(body["folder"]))
+        if new_folder != doc.get("folder", ""):
+            updates["folder"] = new_folder
+            events.append(("document_updated", {"scope": "folder", "folder": new_folder}))
+
     if "rag_eligible" in body:
         updates["rag_eligible"] = bool(body["rag_eligible"])
 
@@ -488,7 +577,7 @@ def update_document(req: RequestContext) -> dict:
         try:
             from ..rag import ingest_document, remove_document_chunks
             if updates.get("rag_eligible", doc.get("rag_eligible")):
-                s3 = aws.get_client("s3")
+                s3 = aws.storage_client()
                 obj = s3.get_object(Bucket=aws.settings.document_bucket, Key=doc["storage_key"])
                 # controlled decryption for indexing inside trusted backend
                 from ..functions.documents import decrypt_document as _dec  # noqa
@@ -544,7 +633,7 @@ def delete_document(req: RequestContext) -> dict:
 
     # 3. delete encrypted object
     try:
-        aws.get_client("s3").delete_object(
+        aws.storage_client().delete_object(
             Bucket=aws.settings.document_bucket, Key=doc["storage_key"]
         )
     except Exception:

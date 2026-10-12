@@ -19,6 +19,9 @@ EVENT_TYPES = {
     "document_deleted", "document_updated",
     # sharing
     "share_created", "share_accessed", "share_access_denied", "share_revoked",
+    # connections (student social graph)
+    "connection_requested", "connection_accepted", "connection_declined",
+    "connection_removed",
     # profile
     "profile_updated", "visibility_changed",
     # AI

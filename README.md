@@ -199,7 +199,32 @@ never leaves the backend; the browser receives only the publishable key id.
 `GET /auth/me` and `GET /documents` also carry a `storage` block, so the meter
 in the sidebar and the vault renders without an extra round-trip.
 
+### Cloudflare R2 object storage (optional)
+
+Document bodies are stored through one abstraction (`aws.storage_client()`), so
+the object store can be redirected to **Cloudflare R2** purely by configuration
+— no AWS S3 account required. Metadata still lives in DynamoDB and each DEK is
+still wrapped by KMS; R2 replaces only the ciphertext bucket, which already
+holds AES-256-GCM ciphertext, so no `aws:kms` SSE header is sent to R2.
+
+| Variable | Example | Notes |
+| -------- | ------- | ----- |
+| `OBSIDIAN_STORAGE_BACKEND` | `r2` | `s3` (default) or `r2` |
+| `OBSIDIAN_R2_ENDPOINT` | `https://<account>.r2.cloudflarestorage.com` | From the R2 dashboard |
+| `OBSIDIAN_R2_ACCESS_KEY_ID` | *(secret)* | R2 **S3** key id |
+| `OBSIDIAN_R2_SECRET_ACCESS_KEY` | *(secret)* | R2 **S3** secret |
+| `OBSIDIAN_R2_REGION` | `auto` | R2 uses `auto` |
+| `OBSIDIAN_DOCUMENT_BUCKET` | `obsidian-documents` | Must be an **existing** R2 bucket |
+
+Create the credentials under **R2 → Manage R2 API Tokens → Create API Token →
+Object Read & Write** — this yields an S3 access key id / secret pair. (A
+Cloudflare *account* API token is a different thing and does not work here.)
+Because R2 has no create-bucket or bucket-policy API, create the bucket first
+and scope the token to it. Locally, moto keeps emulating DynamoDB/KMS while R2
+requests pass through to Cloudflare.
+
 ---
+
 
 ## Deploy (Docker · AWS · Netlify · Google)
 
@@ -307,6 +332,8 @@ Delivery order is Resend → SMTP → local dev mailbox.
 | `OBSIDIAN_ALLOWED_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | CORS allow-list |
 | `OBSIDIAN_COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
 | `OBSIDIAN_STATIC_DIR` | *(empty)* | Serve the built SPA from the API process (single-container deploy) |
+| `OBSIDIAN_STORAGE_BACKEND` | `s3` | `s3` (AWS S3 / moto) or `r2` (Cloudflare R2 — see above) |
+| `OBSIDIAN_R2_ENDPOINT` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` / `_REGION` | *(empty)* / `auto` | Cloudflare R2 S3 credentials and endpoint |
 | `OBSIDIAN_SMTP_HOST` / `_PORT` / `_USERNAME` / `_PASSWORD` | *(empty)* / `587` | SMTP delivery for real OTP email |
 | `RAZORPAY_KEY_ID` / `_KEY_SECRET` / `_WEBHOOK_SECRET` | *(empty)* | Storage payments. Unset ⇒ simulated checkout in dev mode only |
 | `LLM_PROVIDER` | `ollama` | `ollama` or any OpenAI-compatible provider |
