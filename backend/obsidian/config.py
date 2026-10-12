@@ -64,6 +64,18 @@ class Settings:
     cf_api_token: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_CF_API_TOKEN", ""))
     kv_namespace_id: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_KV_NAMESPACE_ID", ""))
 
+    # Durable state. When AWS is emulated in-process (moto) the database is
+    # in-memory and resets on every restart. If a Cloudflare object store is
+    # configured, the whole database is snapshotted there and restored on boot,
+    # so users, documents, groups and keys survive restarts. Auto-enabled when a
+    # Cloudflare credential is present; set OBSIDIAN_PERSIST_STATE=false to opt
+    # out. The interval bounds how often a changed database is written back.
+    persist_state: bool = field(default_factory=lambda: _bool(
+        "OBSIDIAN_PERSIST_STATE",
+        bool(os.environ.get("OBSIDIAN_CF_API_TOKEN") or os.environ.get("OBSIDIAN_R2_ACCESS_KEY_ID")),
+    ))
+    persist_interval: int = field(default_factory=lambda: _int("OBSIDIAN_PERSIST_INTERVAL", 20))
+
     # App
     public_base_url: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_PUBLIC_BASE_URL", "http://localhost:5173"))
     api_base_url: str = field(default_factory=lambda: os.environ.get("OBSIDIAN_API_BASE_URL", "http://localhost:8080"))
@@ -220,6 +232,15 @@ class Settings:
     def cloud_object_store(self) -> bool:
         """True when objects live in a Cloudflare store (R2 or Workers KV)."""
         return self.r2_configured or self.kv_configured
+
+    @property
+    def state_persistence_enabled(self) -> bool:
+        """True when in-process AWS state should be mirrored to Cloudflare.
+
+        Only meaningful for the in-memory (moto) deployment with a Cloudflare
+        object store to write into; real AWS is already durable.
+        """
+        return self.persist_state and self.local_aws and self.cloud_object_store
 
     @property
     def llm_configured(self) -> bool:

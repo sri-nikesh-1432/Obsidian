@@ -9,9 +9,11 @@ Usage:  python backend/local/server.py  (default port 5000)
 from __future__ import annotations
 
 import base64
+import atexit
 import json
 import mimetypes
 import os
+import signal
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +29,7 @@ os.environ.setdefault("OBSIDIAN_RELAX_RATE_LIMITS", "1")
 print("[server] env OBSIDIAN_DEMO_SHOW_ERRORS =", os.environ.get("OBSIDIAN_DEMO_SHOW_ERRORS"), file=sys.stderr)
 
 from obsidian import aws                      # noqa: E402
+from obsidian import persistence              # noqa: E402
 from obsidian.config import settings          # noqa: E402
 from obsidian.security import limiter         # noqa: E402
 print("[server] importing gateway…", file=sys.stderr)
@@ -190,6 +193,8 @@ class Handler(BaseHTTPRequestHandler):
         resp = dispatch(event, None)
         print(f"[server] dispatch returned status={resp.get('statusCode')}", file=sys.stderr)
         status = resp.get("statusCode", 200)
+        if method in ("POST", "PUT", "PATCH", "DELETE") and status < 500:
+            persistence.mark_dirty()
         headers = resp.get("headers", {})
         raw = resp.get("body", "")
         payload = raw.encode("utf-8") if isinstance(raw, str) else raw
@@ -231,6 +236,29 @@ def main() -> None:
         "OBSIDIAN_PUBLIC_BASE_URL", "http://localhost:5173")
     aws.ensure_resources()
     print("[server] aws.ensure_resources() done", file=sys.stderr)
+
+    # Durable state: pull the last snapshot back into the in-memory database,
+    # then keep mirroring changes so a restart resumes exactly where we left off.
+    if persistence.restore():
+        print("[server] durable state restored from object store", file=sys.stderr)
+    if persistence.enabled():
+        persistence.start_autosave()
+        atexit.register(persistence.flush)
+
+        def _persist_and_exit(signum, _frame):  # noqa: ANN001
+            persistence.flush()
+            raise SystemExit(0)
+
+        for _sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(_sig, _persist_and_exit)
+            except (ValueError, OSError):
+                pass
+        print(f"[server] durable state ON ({settings.storage_backend}) · flush every "
+              f"{settings.persist_interval}s", file=sys.stderr)
+    else:
+        print("[server] durable state OFF (in-memory only)", file=sys.stderr)
+
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print("[server] server created on", HOST, PORT, file=sys.stderr)
     print("=" * 68)

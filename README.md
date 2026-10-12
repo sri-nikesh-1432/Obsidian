@@ -196,6 +196,33 @@ python tests/e2e_smoke.py http://localhost:5173   # 27 checks
   ships **no secrets** — the browser receives only the Razorpay *publishable*
   key id, and all sensitive calls go through the same-origin API.
 
+## Durable state (survives restarts)
+
+The Docker/VM deployment runs AWS **in-process** (moto), so DynamoDB, S3 and KMS
+are in memory — normally that means a restart wipes every account and document.
+When a Cloudflare object store is configured (Workers KV or R2), OBSIDIAN turns
+that on its head: the entire database is snapshotted into the object store and
+restored on boot, so **users, documents, groups, sessions and encryption keys
+all survive a restart or redeploy**.
+
+- A background writer mirrors every DynamoDB table to a single gzipped blob
+  (`system/db-snapshot.json.gz`) at most every `OBSIDIAN_PERSIST_INTERVAL`
+  seconds (default 20), and flushes immediately on shutdown (SIGTERM).
+- On startup the snapshot is read back into the fresh in-memory database
+  before the first request is served.
+- The KMS CMK is replaced by a small **software KMS** whose root key lives in
+  the same object store (`system/kms-root`), so previously wrapped document
+  keys stay decryptable after a restart — the real KMS key material is not
+  exportable, which is why this shim exists for the emulated deployment.
+- Auto-enabled whenever `OBSIDIAN_CF_API_TOKEN` (or R2 credentials) are
+  present; set `OBSIDIAN_PERSIST_STATE=false` to opt out. It is a no-op against
+  real AWS, which is already durable.
+
+**Trade-off:** the write-back is bounded by `OBSIDIAN_PERSIST_INTERVAL`, so a
+hard crash (not a clean restart) can lose the last few seconds of changes, and
+Workers KV's free tier allows 1,000 writes/day. For strong durability use real
+AWS (`infra/template.yaml`) or R2; for a cardless demo, Workers KV is enough.
+
 ## Groups & group chat (faculty)
 
 A `faculty` account is a *teacher*. Teachers create groups, add students by
@@ -473,6 +500,8 @@ backend/
     functions/       auth, documents, sharing, connections, groups, profile, intelligence, admin, billing ...
     plans.py         student storage plan ladder (5 GB free, +10 GB tiers)
     aws.py           moto bootstrap + cached boto3 clients
+    persistence.py   durable snapshot/restore + software KMS for the emulated deploy
+    crypto.py        AES-256-GCM envelope encryption
   local/
     server.py        local API Gateway-compatible dev server (port 5000)
     seed.py          demo data seeder (drives the real API)
@@ -502,7 +531,9 @@ docs/DEPLOY.md        deploy guide for every target
 - Assistant responses are not streamed yet (answers arrive complete).
 - Storage upgrades are one-time purchases, not auto-renewing subscriptions; a
   Razorpay subscription plan would be the next step.
-- The Docker deployment runs AWS in-process (moto), so its data is **ephemeral**
-  and resets when the container restarts. Use the AWS stack for durable storage.
+- The Docker deployment runs AWS in-process (moto), so its data is in memory by
+  default. Configure a Cloudflare object store (see *Durable state*) to snapshot
+  and restore it across restarts, or use the AWS stack for real durability. The
+  snapshot is interval-based, so a hard crash can lose the last few seconds.
 - Every later +10 GB tier is priced at ₹6,999 (the specification gives explicit
   prices for the 15 GB and 25 GB plans only).

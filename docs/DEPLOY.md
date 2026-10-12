@@ -55,8 +55,9 @@ docker run -p 8080:8080 --env-file .env obsidian
 > **Note:** the Docker image runs with `OBSIDIAN_DEV_MODE=true` so sign-up is
 > complete without an email provider and payments can be simulated. Set
 > `OBSIDIAN_DEV_MODE=false` once SMTP and Razorpay are configured. (Also note
-> the in-process AWS mock is ephemeral — data resets when the container does.
-> Use option 2 for durable storage.)
+> the in-process AWS mock is in memory by default — data resets when the
+> container does. Configure a Cloudflare object store to snapshot/restore it
+> across restarts, or use option 2 for real durable storage.)
 
 ### Run without Docker
 

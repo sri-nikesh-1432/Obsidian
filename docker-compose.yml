@@ -13,6 +13,9 @@
 #   OBSIDIAN_STORAGE_BACKEND=kv + OBSIDIAN_CF_ACCOUNT_ID +
 #   OBSIDIAN_CF_API_TOKEN + OBSIDIAN_KV_NAMESPACE_ID
 #                                             -> store documents in Workers KV
+#                                             -> and persist the whole in-memory
+#                                                database so it survives restarts
+#   OBSIDIAN_PERSIST_INTERVAL=20              -> seconds between state write-backs
 services:
   obsidian:
     build: .
@@ -41,5 +44,7 @@ services:
       OBSIDIAN_CF_ACCOUNT_ID: ${OBSIDIAN_CF_ACCOUNT_ID:-}
       OBSIDIAN_CF_API_TOKEN: ${OBSIDIAN_CF_API_TOKEN:-}
       OBSIDIAN_KV_NAMESPACE_ID: ${OBSIDIAN_KV_NAMESPACE_ID:-}
+      OBSIDIAN_PERSIST_STATE: ${OBSIDIAN_PERSIST_STATE:-}
+      OBSIDIAN_PERSIST_INTERVAL: ${OBSIDIAN_PERSIST_INTERVAL:-20}
       OBSIDIAN_DEV_MODE: ${OBSIDIAN_DEV_MODE:-true}
     restart: unless-stopped

@@ -18,6 +18,7 @@ from boto3.dynamodb.conditions import Key, Attr  # noqa: F401  (re-exported for 
 from botocore.config import Config
 
 from .config import settings
+from . import persistence
 
 _lock = threading.RLock()
 _mock = None
@@ -123,7 +124,14 @@ def _ensure_mock() -> None:
 
 
 def get_client(service: str):
-    """Return a cached boto3 client. Moto intercepts calls when running locally."""
+    """Return a cached boto3 client. Moto intercepts calls when running locally.
+
+    When durable state is enabled the emulated KMS is replaced by a software KMS
+    whose root key persists in the Cloudflare object store, so document keys stay
+    decryptable across restarts.
+    """
+    if service == "kms" and persistence.enabled():
+        return persistence.software_kms()
     _ensure_mock()
     with _lock:
         if service not in _clients:
@@ -415,6 +423,8 @@ def ensure_resources() -> None:
 
 
 def kms_key_id() -> str:
+    if persistence.enabled():
+        return persistence.software_kms().key_id
     ensure_resources()
     if settings.kms_key_id:
         return settings.kms_key_id
